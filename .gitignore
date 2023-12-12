@@ -40,4 +40,5 @@ notebooks/models/*
 notebooks/wandb/*
 wandb/*
 postprocessing/__pycache__/peak_selection.cpython-310.pyc
-.vscode/.gitconfig
+.vscode/*
+
