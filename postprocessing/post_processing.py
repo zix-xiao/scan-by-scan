@@ -16,14 +16,25 @@ def calculate_sum_activation_array(
     Maxquant_result: pd.DataFrame,
     MS1ScansNoArray: pd.DataFrame,
     activation: np.ndarray,
-    RT_ref: str = "Retention time new",
+    ref_RT_start: None | str = "Retention time start",
+    ref_RT_end: None | str = "Retention time end",
+    ref_RT_apex: str = "Retention time new",
     n_peaks: int | None = 1,
     return_peak_result: bool = False,
     **kwargs,
 ):
-    ref_RT_array = Maxquant_result[[RT_ref, "id"]].values.reshape(
-        [activation.shape[0], 2]
-    )
+    if ref_RT_start and ref_RT_end:
+        ref_RT_array = Maxquant_result[
+            ["id", ref_RT_apex, ref_RT_start, ref_RT_end]
+        ].values.reshape([activation.shape[0], 4])
+    else:
+        ref_RT_array = Maxquant_result[["id", ref_RT_apex]].values.reshape(
+            [activation.shape[0], 2]
+        )
+        ref_RT_array = np.concatenate(
+            (ref_RT_array, np.full((activation.shape[0], 2), None))
+        )
+
     Logger.debug("shape of activation %s", activation.shape)
     Logger.debug("shape of reference RT %s", ref_RT_array.shape)
     act_ref_RT = np.concatenate((activation, ref_RT_array), axis=1)
@@ -31,10 +42,12 @@ def calculate_sum_activation_array(
     if return_peak_result:
         Logger.warning("Returning peak result is significantly slower!")
         results = [
-            extract_elution_peak_from_row_act(
-                activation_row=act_ref_RT_row[:-2],
-                ref_RT=act_ref_RT_row[-2],
-                PCM_id=act_ref_RT_row[-1],
+            extract_elution_peak_from_act_row(
+                activation_row=act_ref_RT_row[:-4],
+                PCM_id=act_ref_RT_row[-4],
+                ref_RT_apex=act_ref_RT_row[-3],
+                ref_RT_start=act_ref_RT_row[-2],
+                ref_RT_end=act_ref_RT_row[-1],
                 MS1ScansNoArray=MS1ScansNoArray,
                 n_peaks=n_peaks,
                 return_peak_result=True,
@@ -49,9 +62,9 @@ def calculate_sum_activation_array(
         return sum_peak, peak_results
     else:
         peak_sum_activation = np.apply_along_axis(
-            lambda act_ref_RT_row: extract_elution_peak_from_row_act(
+            lambda act_ref_RT_row: extract_elution_peak_from_act_row(
                 activation_row=act_ref_RT_row[:-2],
-                ref_RT=act_ref_RT_row[-2],
+                ref_RT_apex=act_ref_RT_row[-2],
                 PCM_id=act_ref_RT_row[-1],
                 MS1ScansNoArray=MS1ScansNoArray,
                 n_peaks=n_peaks,
@@ -65,10 +78,12 @@ def calculate_sum_activation_array(
         return sum_peak
 
 
-def extract_elution_peak_from_row_act(
+def extract_elution_peak_from_act_row(
     activation_row: Union[pd.Series, np.array],
     MS1ScansNoArray: pd.DataFrame,
-    ref_RT: float,
+    ref_RT_apex: float | None = None,
+    ref_RT_start: float | None = None,
+    ref_RT_end: float | None = None,
     n_peaks: int = 1,
     return_peak_result: bool = False,
     peak_width_thres=(2, None),
@@ -78,12 +93,16 @@ def extract_elution_peak_from_row_act(
 ):
     """ """
     # Logger.debug("row name %s", activation_row.name)
-    peaks, peak_property = find_peaks(
-        activation_row, width=peak_width_thres, height=peak_height_thres, **kwargs
+    peaks, peak_properties = find_peaks(
+        activation_row,
+        width=peak_width_thres,
+        height=peak_height_thres,
+        rel_height=1,  # critical for peak_width, do not change
+        **kwargs,
     )
-    left = np.round(peak_property["left_ips"], decimals=0).astype(int)
-    right = np.round(peak_property["right_ips"], decimals=0).astype(int)
-    Logger.debug("Reference retention time %s", ref_RT)
+    left = np.round(peak_properties["left_ips"], decimals=0).astype(int)
+    right = np.round(peak_properties["right_ips"], decimals=0).astype(int)
+    Logger.debug("Reference retention time %s", ref_RT_apex)
     peak_result = pd.DataFrame(
         {
             "id": np.repeat(PCM_id, len(left)).astype(int),
@@ -94,7 +113,7 @@ def extract_elution_peak_from_row_act(
             "end_scan": right,
             "end_time": MS1ScansNoArray["starttime"][right].values,
             "peak_width": right - left,
-            "peak_height": peak_property["peak_heights"],
+            "peak_height": peak_properties["peak_heights"],
             "peak_intensity_auc": [
                 auc(
                     x=MS1ScansNoArray["starttime"][i - 1 : j + 1],
@@ -104,14 +123,33 @@ def extract_elution_peak_from_row_act(
             ],
         }
     )
-    if ref_RT is not None:
+    if ref_RT_apex is not None:
+        peak_result["matched"] = False
         # Logger.debug('Preserving the %s closest peaks to reference RT.', n_peaks)
-        peak_result["RT_diff"] = abs(peak_result["apex_time"] - ref_RT)
+        peak_result["RT_apex_diff"] = abs(peak_result["apex_time"] - ref_RT_apex)
+        if ref_RT_start and ref_RT_end:
+            Logger.info("Use RT range as reference for peak selection.")
+            peak_result["RT_start_diff"] = abs(peak_result["start_time"] - ref_RT_start)
+            peak_result["RT_end_diff"] = abs(peak_result["end_time"] - ref_RT_end)
+            peak_result["RT_diff_sum"] = (
+                peak_result["RT_start_diff"] + peak_result["RT_end_diff"]
+            )
 
-        peak_result_preserved = peak_result.nsmallest(n_peaks, "RT_diff")
-        sum_intensity = peak_result_preserved["peak_intensity_auc"].sum()
+            peak_result.loc[
+                peak_result.nsmallest(n_peaks, "RT_diff_sum").index, "matched"
+            ] = True
+        else:
+            Logger.info("Use RT apex as reference for peak selection.")
+            peak_result.loc[
+                peak_result.nsmallest(n_peaks, "RT_apex_diff").index, "matched"
+            ] = True
+
+        sum_intensity = peak_result.loc[
+            peak_result["matched"] == True, "peak_intensity_auc"
+        ].sum()
         Logger.debug("sum intensity %s", sum_intensity)
     else:
+        Logger.info("No peak selection conducted.")
         sum_intensity = peak_result["peak_intensity_auc"].sum()
 
     if return_peak_result:
