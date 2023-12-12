@@ -1,0 +1,34 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+    
+
+        {
+            "name": "Python: Current File",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": [
+                "--mzml_path", 
+                "/mnt/cmnfs/proj/ORIGINS/data/ecoli/ss/DDA/raw/msconvert/BBM_647_P241_02_07_ssDDA_MIA_001.mzML",
+                "--MQ_ref_path", 
+                "/mnt/cmnfs/proj/ORIGINS/data/ecoli/HpHRP/MQ/1FDR/combined/txt/evidence_1_FilteredByClosestRT_transfer_RT_pred_filtered_withIso.pkl",
+                "--RT_tol",
+                "1.0",
+                "--opt-algo",
+                "threshold",
+                "--MQ_exp_path",
+                "/mnt/cmnfs/proj/ORIGINS/data/ecoli/ss/DDA/MQ/combined/txt/evidence_1.txt",
+                "--notes",
+                "test_",
+                "--PS_cos_dist",
+                "True"
+            ]
+        }
+    ]
+}
