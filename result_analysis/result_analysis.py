@@ -330,7 +330,9 @@ def PlotCorr(
 def PlotActivation(
     MaxquantEntry: pd.Series,
     PrecursorTimeProfiles: list,
+    PrecursorScanCosDist: list | None,
     PrecursorTimeProfileLabels: list,
+    PrecursorScanCosDistLabels: list | None,
     MS1ScansNoArray: pd.DataFrame,
     RT_tol: float = 0.0,
     log_intensity: bool = False,
@@ -360,18 +362,27 @@ def PlotActivation(
 
     if log_intensity:
         ActivationInRange = np.log10(ActivationInRange + 1)
-    sns.scatterplot(data=ActivationInRange, legend=False)  # type: ignore
-    sns.lineplot(data=ActivationInRange, legend="brief")
+
+    fig, ax1 = plt.subplots()
+    sns.scatterplot(data=ActivationInRange, legend=False, ax=ax1)  # type: ignore
+    sns.lineplot(
+        data=ActivationInRange,
+        legend=False,
+        ax=ax1,
+        # color="green",
+        # label="activation",
+    )
 
     # experimental RT range
     for x in EluteRange:
-        plt.axvline(x=x, linewidth=2, color="black", label="dict RT range")
-    plt.axvline(
+        ax1.axvline(x=x, linewidth=2, color="black", label="dict RT range")
+    ax1.axvline(
         x=MaxquantEntry["Retention time"].values[0],
         linewidth=2,
         color="grey",
         label="dict RT",
     )
+
     Logger.info(
         "dict RT can be either from reference file or from experiment file, depending"
         " on the MaxquantEntry specified."
@@ -379,23 +390,52 @@ def PlotActivation(
 
     # reference RT for reconstruction
     for x in RTrange:
-        plt.axvline(x=x, linewidth=2, color="red", label="SBS_RT_tol")
-    plt.axvline(
+        ax1.axvline(x=x, linewidth=2, color="red", label="SBS_RT_tol")
+    ax1.axvline(
         x=MaxquantEntry[RT_ref].values[0],
         linewidth=2,
         color="orange",
         label="SBS_RT_ref",
     )
 
-    plt.legend(title="Smoothing", bbox_to_anchor=(1.5, 1), loc="upper right")
-    plt.xlabel("Time (Minutes)")
-    plt.ylabel("Activation")
+    if PrecursorScanCosDist is not None:
+        CosDist = pd.DataFrame(
+            dict(zip(PrecursorScanCosDistLabels, PrecursorScanCosDist))
+        )
+        CosDist = CosDist.set_index(MS1ScansNoArray["starttime"])
+        CosDistInRange = CosDist.iloc[ScanIdx, :]
+        CosDist = CosDist.replace(0, np.nan)
+        # print(CosDist)
+        ax2 = ax1.twinx()
+        # sns.scatterplot(data=CosDistInRange, legend=False, ax=ax2)
+        sns.lineplot(
+            data=CosDistInRange,
+            ax=ax2,
+            legend=False,
+            palette=["pink", "yellow", "brown"],
+            label="cos dist",
+        )
+        ax2.set_ylabel("cosine distance")
+
+    # plt.legend(title="Smoothing", bbox_to_anchor=(1.5, 1), loc="upper right", ax = ax1)
+    ax1.set_xlabel("Time (Minutes)")
+    ax1.set_ylabel("Activation")
+
+    # Get the legend handles and labels for both axes
+    handles1, labels1 = ax1.get_legend_handles_labels()
+    handles2, labels2 = ax2.get_legend_handles_labels()
+
+    # Merge the legend handles and labels
+    handles = handles1 + handles2
+    labels = labels1 + labels2
+    plt.legend(handles, labels, bbox_to_anchor=(1.5, 1), loc="upper right")
+
     title = (
         MaxquantEntry["Modified sequence"].values[0]
         + ", "
         + str(MaxquantEntry["Charge"].values[0])
     )
-    plt.title(title)
+    ax1.set_title(title)
 
     if save_dir is not None:
         if not os.path.exists(save_dir):
