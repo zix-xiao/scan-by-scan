@@ -5,19 +5,34 @@ from typing import Literal, Union
 
 import numpy as np
 import pandas as pd
-from keras.layers import Conv1D, Dense, Dropout, Embedding, GlobalMaxPooling1D, Masking
+from keras.layers import (
+    Conv1D,
+    Dense,
+    Dropout,
+    Embedding,
+    GlobalMaxPooling1D,
+    Masking,
+    LSTM,
+)
 from keras.losses import BinaryCrossentropy
 from keras.models import Sequential
 from keras.optimizers import Adam
 from numba import jit
 from sklearn.metrics import accuracy_score
-from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.preprocessing import (
+    LabelEncoder,
+    StandardScaler,
+    MinMaxScaler,
+    scale,
+    minmax_scale,
+)
 from tensorflow.keras import regularizers
 from tensorflow.keras.callbacks import EarlyStopping
 from tensorflow.keras.models import load_model
 from tensorflow.keras import metrics
 from tensorflow.keras.initializers import Constant
 import tensorflow as tf
+import matplotlib.pyplot as plt
 
 Logger = logging.getLogger(__name__)
 
@@ -37,17 +52,63 @@ METRICS = [
 
 
 def prepare_peak_input(
-    peak_results: pd.DataFrame, activation_df: pd.DataFrame, margin: int = 3
+    peak_results: pd.DataFrame,
+    activation_df: pd.DataFrame,
+    log_intensity: bool = False,
+    standardize: Literal["std", "minmax"] | None = "std",
+    margin: int = 3,
+    method: Literal["mask", "clip"] = "mask",
 ):
-    def get_roi(peak_results_row: pd.Series):
-        return activation_df.loc[
-            peak_results_row["id"],
-            peak_results_row["start_scan"]
-            - margin : peak_results_row["end_scan"]
-            + margin,
-        ].values
+    if log_intensity:
+        activation_df = np.log(activation_df + 1)
+    match standardize:
+        case "std":
+            activation_df_std = scale(activation_df, axis=1)
+            # scaler = StandardScaler()
+            # activation_df_std = scaler.fit_transform(activation_df.values.T)
+        case "minmax":
+            activation_df_std = minmax_scale(activation_df, axis=1)
+            # activation_df_std = pd.DataFrame(
+            #     activation_df_std.T,
+            #     index=activation_df.index,
+            #     columns=activation_df.columns,
+            # )
+        case None:
+            scaler = None
+            activation_df_std = activation_df
+    activation_df_std = pd.DataFrame(
+        activation_df_std, index=activation_df.index, columns=activation_df.columns
+    )
 
-    peaks = peak_results.apply(get_roi, axis=1)
+    def get_roi(peak_results_row: pd.Series, method: Literal["mask", "clip"] = "mask"):
+        # Calculate the start and end indices
+        start_index = peak_results_row["start_scan"] - margin
+        end_index = peak_results_row["end_scan"] + margin
+        # Logger.debug("Start index: %s", start_index)
+        # Logger.debug("End index: %s", end_index)
+        match method:
+            case "mask":
+                # Get the original row
+                original_row = activation_df_std.loc[peak_results_row["id"]].values
+                # Create a new row with all values set to 0
+                new_row = np.zeros_like(original_row)
+                # Replace the selected part in the new row with the original values
+                new_row[start_index : end_index + 1] = original_row[
+                    start_index : end_index + 1
+                ]
+                return new_row[
+                    peak_results_row["scan_number_left"] : peak_results_row[
+                        "scan_number_right"
+                    ]
+                    + 1
+                ]
+            case "clip":
+                return activation_df_std.loc[
+                    peak_results_row["id"],
+                    start_index : end_index + 1,
+                ].values
+
+    peaks = peak_results.apply(get_roi, axis=1, method=method)
     return peaks.values
 
 
@@ -55,34 +116,81 @@ class PeakSelectionModel:
     def __init__(
         self,
         peak_input: np.ndarray,
-        peak_label: np.ndarray,
-        precursor_id: np.ndarray,
+        peak_results: pd.DataFrame | None = None,
+        peak_label: np.ndarray | None = None,
+        precursor_id: np.ndarray | None = None,
         random_seed: int = 42,
         initial_bias: Union[float, None, Literal["auto"]] = None,
         use_class_weight: bool = False,
     ):
         self.peak_input = peak_input
         self.random_seed = random_seed
-        self.label_list = sorted(list(set(peak_label)))
-        self.peak_label = peak_label
-        self.precursor_id = precursor_id
+
+        if peak_results is not None:
+            self.peak_results = peak_results
+            self.peak_label = peak_results["matched"]
+            self.precursor_id = peak_results["id"]
+        else:
+            assert peak_label is not None
+            assert precursor_id is not None
+            self.peak_label = peak_label
+            self.precursor_id = precursor_id
+        self.label_list = sorted(list(set(self.peak_label)))
         self.padded_sequences = None
         self.mask = None
         self.initial_bias = initial_bias
         self.use_class_weight = use_class_weight
+        self.maxlen = None
+
+    def report_data_distribution(self):
+        print("Number of precursors:", len(set(self.precursor_id)))
+        print(
+            "Label"
+            f" distribution:\n{self.peak_results['matched'].value_counts().to_string()}"
+        )
+        print(f"All peak results:\n{self.peak_results.describe().to_string()}")
+        print("Positive peak results:")
+        print(
+            self.peak_results[self.peak_results["matched"] == 1].describe().to_string()
+        )
+        print("Negative peak results:")
+        print(
+            self.peak_results[self.peak_results["matched"] == 0].describe().to_string()
+        )
+        print("Number of peaks for each precursor:")
+        print(self.peak_results.groupby("id").size().describe().to_string())
+        self.peak_results.groupby("id").size().hist(
+            bins=self.peak_results.groupby("id").size().max()
+        )
 
     def pad_peak_input(
-        self, maxlen: int | None = None, value: int = -1, padding: str = "post"
+        self,
+        maxlen: int | None = None,
+        value: float = -1.0,
+        padding: Literal["post", "two_side"] = "post",
     ):
         if maxlen is None:
             maxlen = max(map(len, self.peak_input))
         self.maxlen = maxlen
+        match padding:
+            case "post":
 
-        @jit(nopython=True)
-        def pad_sequence(peak, maxlen, value):
-            result = np.full((maxlen,), value)
-            result[: len(peak)] = peak
-            return result
+                @jit(nopython=True)
+                def pad_sequence(peak, maxlen, value):
+                    result = np.full((maxlen,), value)
+                    result[: len(peak)] = peak
+                    return result
+
+            case "two_side":
+
+                @jit(nopython=True)
+                def pad_sequence(peak, maxlen, value):
+                    result = np.full((maxlen,), value)
+                    pad_length = maxlen - len(peak)
+                    before = pad_length // 2
+                    # after = pad_length - before
+                    result[before : before + len(peak)] = peak
+                    return result
 
         self.padded_sequences = np.array(
             [pad_sequence(peak, maxlen, value) for peak in self.peak_input]
@@ -110,7 +218,7 @@ class PeakSelectionModel:
 
         X_train = self.padded_sequences[self.train_indices]
         X_test = self.padded_sequences[self.test_indices]
-
+        Logger.debug("X_train shape: %s", X_train.shape)
         if normalize:
             scaler = StandardScaler()
             X_train = scaler.fit_transform(X_train)
@@ -146,6 +254,7 @@ class PeakSelectionModel:
             self.class_weight = {0: weight_for_0, 1: weight_for_1}
         else:
             self.class_weight = None
+        self.resampled_ds = None
 
     def resample_train_data(
         self,
@@ -224,7 +333,10 @@ class PeakSelectionModel:
         val_ds = tf.data.Dataset.from_tensor_slices((self.X_test, self.y_test)).cache()
         self.val_ds = val_ds.batch(BATCH_SIZE).prefetch(2)
 
-    def make_model(self, model=None, lr=0.0001, optimizer="Adam", metrics=METRICS):
+    def make_model(
+        self,
+        config: dict,
+    ):
         output_bias = None
 
         if isinstance(self.initial_bias[0], float) and self.resampled_ds is None:
@@ -232,59 +344,89 @@ class PeakSelectionModel:
             Logger.debug("Output bias: %s", output_bias)
 
         # if model then load existing trained model
-        if model is not None:
-            # This is not right until we also save the training and testing sets
-            model_path = pathlib.Path(model)
-            Logger.info("Using existing model: %s", model_path.resolve())
-            self.class_model = load_model(model)
+        match config["model"]:
+            case "LSTM":
+                self.y_train = self.y_train.reshape(-1, 1)
+                # Build the LSTM model with Masking layer
+                model = Sequential()
+                model.add(
+                    Masking(mask_value=-1)
+                )  # Masking layer with the padding marker
+                model.add(
+                    LSTM(
+                        config["lstm_n_units"],
+                        activation="relu",
+                        input_shape=(1, self.maxlen),
+                    )
+                )
+                model.add(
+                    Dense(
+                        1,
+                        activation="sigmoid",
+                        use_bias=True,
+                        bias_initializer=output_bias,
+                        name="dense_prediction",
+                    )
+                )
 
-        # else, create a new model
-        else:
-            # Build the CNN model with Masking layer
-            model = Sequential()
-            model.add(Masking(mask_value=-1))  # Masking layer with the padding marker
-            model.add(
-                Conv1D(
-                    filters=32,
-                    kernel_size=5,
-                    activation="relu",
-                    input_shape=(None, self.maxlen),
+                model.compile(
+                    optimizer=Adam(learning_rate=config["learning_rate"]),
+                    loss=BinaryCrossentropy(),
+                    metrics=config["metric"],
                 )
-            )
-            model.add(
-                Conv1D(
-                    filters=64,
-                    kernel_size=5,
-                    activation="relu",
-                    input_shape=(None, self.maxlen),
+                self.class_model = model
+            case "CNN":
+                # Build the CNN model with Masking layer
+                model = Sequential()
+                model.add(
+                    Masking(mask_value=-1)
+                )  # Masking layer with the padding marker
+                model.add(
+                    Conv1D(
+                        filters=config["conv1_n_filters"],
+                        kernel_size=config["conv1_kernel_size"],
+                        activation="relu",
+                        input_shape=(None, self.maxlen),
+                    )
                 )
-            )
-            model.add(GlobalMaxPooling1D())
-            model.add(
-                Dense(
-                    128,
-                    kernel_regularizer=regularizers.l2(0.001),
-                    activation="relu",
-                    name="dense_1",
+                model.add(
+                    Conv1D(
+                        filters=config["conv2_n_filters"],
+                        kernel_size=config["conv2_kernel_size"],
+                        activation="relu",
+                        input_shape=(None, self.maxlen),
+                    )
                 )
-            )
-            model.add(Dropout(0.5, name="dropout_1"))
-            model.add(
-                Dense(
-                    1,
-                    activation="sigmoid",
-                    use_bias=True,
-                    bias_initializer=output_bias,
-                    name="dense_prediction",
+                model.add(GlobalMaxPooling1D())
+                model.add(
+                    Dense(
+                        config["dense1_n"],
+                        kernel_regularizer=regularizers.l2(config["dense1_reg_rate"]),
+                        activation="relu",
+                        name="dense_1",
+                    )
                 )
-            )
+                model.add(Dropout(config["dropout_rate"], name="dropout_1"))
+                model.add(
+                    Dense(
+                        1,
+                        activation="sigmoid",
+                        use_bias=True,
+                        bias_initializer=output_bias,
+                        name="dense_prediction",
+                    )
+                )
 
-            model.compile(
-                optimizer=Adam(learning_rate=lr),
-                loss=BinaryCrossentropy(),
-                metrics=metrics,
-            )
-            self.class_model = model
+                model.compile(
+                    optimizer=Adam(learning_rate=config["learning_rate"]),
+                    loss=BinaryCrossentropy(),
+                    metrics=METRICS,
+                )
+                self.class_model = model
+            case other:
+                model_path = pathlib.Path(model)
+                Logger.info("Using existing model: %s", model_path.resolve())
+                self.class_model = load_model(model)
 
     def train_model(self, epochs=1000, weight_class: bool = False, **kwargs):
         # Define early stopping callback
