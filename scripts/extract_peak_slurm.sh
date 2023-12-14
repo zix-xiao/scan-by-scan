@@ -20,7 +20,7 @@ python3 /cmnfs/proj/ORIGINS/protMSD/maxquant/ScanByScan/extract_peak.py \
 --MQ_exp_path=$MQ_exp_path \
 --MS1ScansNoArray_path=$MS1Scans_path \
 --activation_path=$activation_path \
---peak_width_thres="(2,None)" \
+--peak_width_thres="(4,None)" \
 --ref_RT_apex='Retention time new' \
 --ref_RT_start='Retention time start' \
 --ref_RT_end='Retention time end' || exit 91

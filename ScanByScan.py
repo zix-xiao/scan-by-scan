@@ -195,9 +195,7 @@ def opt_scan_by_scan(
         # process scans
         result_dict = process_scans_parallel(
             n_jobs=cpu_count(),
-            MS1Scans=MS1Scans.iloc[
-                1000:1010, :
-            ],  # for small scale testing: MS1Scans.iloc[1000:1050, :]
+            MS1Scans=MS1Scans,  # for small scale testing: MS1Scans.iloc[1000:1050, :]
             Maxquant_result=Maxquant_result_dict,
             loss="lasso",
             opt_algo=opt_algo,

@@ -17,9 +17,15 @@ maxquant_exp='/cmnfs/proj/ORIGINS/data/ecoli/ss/DDA/MQ/combined/txt/evidence_1.t
 ## printing shell variables is complicated by escaping
 source $HOME/condaInit.sh
 conda activate sbs
-python /cmnfs/proj/ORIGINS/protMSD/maxquant/ScanByScan/ScanByScan.py --mzml_path=$mzML \
---MQ_ref_path=$maxquant --RT_tol=1.0 --opt-algo='lasso_cd' \
---RT_ref='pred' --MQ_exp_path=$maxquant_exp --notes='1FDR_' --PS_cos_dist='True' || exit 91
+python /cmnfs/proj/ORIGINS/protMSD/maxquant/ScanByScan/ScanByScan.py \
+--mzml_path=$mzML \
+--MQ_ref_path=$maxquant \
+--RT_tol=1.0 \
+--opt-algo='lasso_cd' \
+--RT_ref='pred' \
+--MQ_exp_path=$maxquant_exp \
+--notes='1FDR_' \
+--PS_cos_dist='True' || exit 91
 
 echo "Script finished"
 exit 0
