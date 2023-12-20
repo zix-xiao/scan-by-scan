@@ -1,38 +1,38 @@
 import logging
 import pathlib
 import random
-from typing import Literal, Union
+from typing import Literal, Union, List
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import tensorflow as tf
 from keras.layers import (
+    LSTM,
     Conv1D,
     Dense,
     Dropout,
     Embedding,
     GlobalMaxPooling1D,
     Masking,
-    LSTM,
 )
 from keras.losses import BinaryCrossentropy
 from keras.models import Sequential
 from keras.optimizers import Adam
 from numba import jit
+from scipy.spatial import cKDTree
 from sklearn.metrics import accuracy_score
 from sklearn.preprocessing import (
     LabelEncoder,
-    StandardScaler,
     MinMaxScaler,
-    scale,
+    StandardScaler,
     minmax_scale,
+    scale,
 )
-from tensorflow.keras import regularizers
+from tensorflow.keras import metrics, regularizers
 from tensorflow.keras.callbacks import EarlyStopping
-from tensorflow.keras.models import load_model
-from tensorflow.keras import metrics
 from tensorflow.keras.initializers import Constant
-import tensorflow as tf
-import matplotlib.pyplot as plt
+from tensorflow.keras.models import load_model
 
 Logger = logging.getLogger(__name__)
 
@@ -51,6 +51,29 @@ METRICS = [
 ]
 
 
+def transform_activation(
+    activation_df: pd.DataFrame,
+    log_intensity: bool = False,
+    standardize: Literal["std", "minmax"] | None = "std",
+):
+    if log_intensity:
+        activation_df = np.log(activation_df + 1)
+    match standardize:
+        case "std":
+            activation_df_std = scale(activation_df, axis=1)
+        case "minmax":
+            activation_df_std = minmax_scale(
+                activation_df, axis=1, feature_range=(0, 1)
+            )
+        case None:
+            scaler = None
+            activation_df_std = activation_df
+    activation_df_std = pd.DataFrame(
+        activation_df_std, index=activation_df.index, columns=activation_df.columns
+    )
+    return activation_df_std
+
+
 def prepare_peak_input(
     peak_results: pd.DataFrame,
     activation_df: pd.DataFrame,
@@ -59,33 +82,11 @@ def prepare_peak_input(
     margin: int = 3,
     method: Literal["mask", "clip"] = "mask",
 ):
-    if log_intensity:
-        activation_df = np.log(activation_df + 1)
-    match standardize:
-        case "std":
-            activation_df_std = scale(activation_df, axis=1)
-            # scaler = StandardScaler()
-            # activation_df_std = scaler.fit_transform(activation_df.values.T)
-        case "minmax":
-            activation_df_std = minmax_scale(activation_df, axis=1)
-            # activation_df_std = pd.DataFrame(
-            #     activation_df_std.T,
-            #     index=activation_df.index,
-            #     columns=activation_df.columns,
-            # )
-        case None:
-            scaler = None
-            activation_df_std = activation_df
-    activation_df_std = pd.DataFrame(
-        activation_df_std, index=activation_df.index, columns=activation_df.columns
-    )
+    activation_df_std = transform_activation(activation_df, log_intensity, standardize)
 
     def get_roi(peak_results_row: pd.Series, method: Literal["mask", "clip"] = "mask"):
-        # Calculate the start and end indices
         start_index = peak_results_row["start_scan"] - margin
         end_index = peak_results_row["end_scan"] + margin
-        # Logger.debug("Start index: %s", start_index)
-        # Logger.debug("End index: %s", end_index)
         match method:
             case "mask":
                 # Get the original row
@@ -97,8 +98,8 @@ def prepare_peak_input(
                     start_index : end_index + 1
                 ]
                 return new_row[
-                    peak_results_row["scan_number_left"] : peak_results_row[
-                        "scan_number_right"
+                    peak_results_row["sbs_window_left_scan"] : peak_results_row[
+                        "sbs_window_right_scan"
                     ]
                     + 1
                 ]
@@ -112,7 +113,116 @@ def prepare_peak_input(
     return peaks.values
 
 
-class PeakSelectionModel:
+def match_time_to_scan(
+    df: pd.DataFrame, time_cols: List[str], MS1Scans_NoArray: pd.DataFrame
+):
+    # Build a KDTree from the starttime values
+    tree = cKDTree(MS1Scans_NoArray[["starttime"]])
+
+    for time_col in time_cols:
+        time_scan_col = time_col + "_scan"
+
+        # Query the tree for the nearest neighbor to each time value
+        _, indices = tree.query(df[[time_col]].values)
+
+        # Use the indices to get the corresponding scan numbers
+        df[time_scan_col] = MS1Scans_NoArray.iloc[indices]["scan_number"].values
+
+    return df
+
+
+def prepare_seq_input_label(
+    activation_df: pd.DataFrame,
+    ref_dict_exp_inner_df: pd.DataFrame,
+    log_intensity: bool = False,
+    standardize: Literal["std", "minmax"] | None = "std",
+):
+    activation_df_std = transform_activation(activation_df, log_intensity, standardize)
+    ref_dict_exp_inner_df.index = ref_dict_exp_inner_df.index.astype(int)
+
+    def mark_peak(ref_dict_exp_inner_df_row):
+        precursor_id = ref_dict_exp_inner_df_row.id
+        sbs_window_left_scan, sbs_window_right_scan = ref_dict_exp_inner_df_row.loc[
+            ["sbs_window_left_scan", "sbs_window_right_scan"]
+        ].astype(int)
+        label = np.zeros_like(activation_df_std.iloc[0].values)
+        label[
+            ref_dict_exp_inner_df_row[
+                "Calibrated retention time start_scan"
+            ] : ref_dict_exp_inner_df_row["Calibrated retention time finish_scan"]
+        ] = 1
+        activation_df_row = activation_df_std.loc[precursor_id]
+        return (
+            label[sbs_window_left_scan : sbs_window_right_scan + 1],
+            activation_df_row[sbs_window_left_scan : sbs_window_right_scan + 1].values,
+        )
+
+    all_results = ref_dict_exp_inner_df.apply(mark_peak, axis=1, result_type="expand")
+    label = all_results[0].values
+    seq = all_results[1].values
+    return label, seq
+
+
+class PeakSegModel:
+    def __init__(
+        self,
+        seq_input: np.ndarray,
+        seq_label: np.ndarray,
+        # MQ_dict_exp_inner: pd.DataFrame,
+        # MS1Scans_NoArray: pd.DataFrame,
+    ):
+        self.seq_input = seq_input
+        self.seq_label = seq_label
+
+    def pad_peak_input(
+        self,
+        maxlen: int | None = None,
+        value: float = -1.0,
+        padding: Literal["post", "two_side"] = "post",
+    ):
+        if maxlen is None:
+            maxlen = max(map(len, self.seq_input))
+        self.maxlen = maxlen
+        Logger.debug("Max length: %s", maxlen)
+        match padding:
+            case "post":
+
+                @jit(nopython=True)
+                def pad_sequence(peak, maxlen, value):
+                    result = np.full((maxlen,), value)
+                    result[: len(peak)] = peak
+                    return result
+
+            case "two_side":
+
+                @jit(nopython=True)
+                def pad_sequence(peak, maxlen, value):
+                    result = np.full((maxlen,), value)
+                    pad_length = maxlen - len(peak)
+                    before = pad_length // 2
+                    # after = pad_length - before
+                    result[before : before + len(peak)] = peak
+                    return result
+
+        self.padded_sequences_input = np.array(
+            [pad_sequence(peak, maxlen, value) for peak in self.seq_input]
+        ).astype(np.float32)
+
+        self.padded_sequences_label = np.array(
+            [pad_sequence(peak, maxlen, 0) for peak in self.seq_label]
+        ).astype(np.float32)
+
+        # Logger.debug("Padded sequences type: %s", self.padded_sequences_input.dtype)
+
+    def plot_sbswindow_with_mask(self, row_id: int):
+        fig, ax = plt.subplots(figsize=(20, 10))
+        ax2 = ax.twinx()
+        ax.plot(self.padded_sequences_input[row_id], color="blue")
+        ax2.plot(self.padded_sequences_label[row_id], color="red")
+        plt.show()
+
+
+class PeakClsModel:
     def __init__(
         self,
         peak_input: np.ndarray,
@@ -187,9 +297,17 @@ class PeakSelectionModel:
                 def pad_sequence(peak, maxlen, value):
                     result = np.full((maxlen,), value)
                     pad_length = maxlen - len(peak)
-                    before = pad_length // 2
-                    # after = pad_length - before
-                    result[before : before + len(peak)] = peak
+                    if pad_length >= 0:
+                        before = pad_length // 2
+                        # after = pad_length - before
+                        result[before : before + len(peak)] = peak
+                    if pad_length < 0:
+                        print(
+                            "peak input longer than maxlen, peak input will be clipped!"
+                        )
+                        before = abs(pad_length) // 2
+                        # after = pad_length - before
+                        result = peak[before : before + pad_length]
                     return result
 
         self.padded_sequences = np.array(
@@ -207,7 +325,9 @@ class PeakSelectionModel:
             self.test_ids = unique_ids[int(len(unique_ids) * 0.8) :]
 
             self.train_indices = np.where(self.precursor_id.isin(self.train_ids))[0]
-            Logger.debug("Train indices: %s", self.train_indices[:10])
+            Logger.debug(
+                "Train indices top 5 max: %s", (-self.train_indices).argsort()[:5]
+            )
             self.test_indices = np.where(self.precursor_id.isin(self.test_ids))[0]
         else:
             indices = np.arange(len(self.padded_sequences))
@@ -506,7 +626,66 @@ class PeakSelectionModel:
         Logger.info("Saved model to: %s", model_path.resolve())
 
 
-def model_tune(config, maxlen, output_bias: float | None = None):
+def model_tuner(hp, maxlen: int = 361, initial_bias: List[float] | None = -1.04778782):
+    model = Sequential()
+    model.add(Masking(mask_value=-1))  # Masking layer with the padding marker
+    hp_conv1_n_filters = hp.Int("conv1_n_filters", min_value=8, max_value=128, step=8)
+    hp_conv1_kernel_size = hp.Int("conv1_kernel_size", min_value=3, max_value=9, step=2)
+    model.add(
+        Conv1D(
+            filters=hp_conv1_n_filters,
+            kernel_size=hp_conv1_kernel_size,
+            activation="relu",
+            input_shape=(None, maxlen),
+        )
+    )
+    hp_conv2_n_filters = hp.Int("conv2_n_filters", min_value=8, max_value=128, step=8)
+    hp_conv2_kernel_size = hp.Int("conv2_kernel_size", min_value=3, max_value=9, step=2)
+    model.add(
+        Conv1D(
+            filters=hp_conv2_n_filters,
+            kernel_size=hp_conv2_kernel_size,
+            activation="relu",
+            input_shape=(None, maxlen),
+        )
+    )
+    model.add(GlobalMaxPooling1D())
+    hp_dense1_n = hp.Int("dense1_n", min_value=8, max_value=128, step=8)
+    hp_dense1_reg_rate = hp.Choice("dense1_reg_rate", [0.0, 0.1, 0.01, 0.001, 0.0001])
+    model.add(
+        Dense(
+            hp_dense1_n,
+            kernel_regularizer=regularizers.l2(hp_dense1_reg_rate),
+            activation="relu",
+            name="dense_1",
+        )
+    )
+    hp_dropout_rate = hp.Choice("dropout_rate", [0.0, 0.1, 0.2, 0.3, 0.4, 0.5])
+    model.add(Dropout(hp_dropout_rate, name="dropout_1"))
+    if isinstance(initial_bias, float):
+        output_bias = Constant(initial_bias)
+        Logger.debug("Output bias: %s", output_bias)
+    else:
+        output_bias = None
+    model.add(
+        Dense(
+            1,
+            activation="sigmoid",
+            bias_initializer=output_bias,
+            name="dense_prediction",
+        )
+    )
+
+    hp_learning_rate = hp.Choice("learning_rate", [1e-2, 1e-3, 1e-4])
+    model.compile(
+        optimizer=Adam(learning_rate=hp_learning_rate),
+        loss=BinaryCrossentropy(),
+        metrics=METRICS,
+    )
+    return model
+
+
+def model_tune_wandb(config, maxlen, output_bias: float | None = None):
     model = Sequential()
     model.add(Masking(mask_value=-1))  # Masking layer with the padding marker
     model.add(
@@ -544,3 +723,40 @@ def model_tune(config, maxlen, output_bias: float | None = None):
         )
     )
     return model
+
+
+def evaluate_id_based_cls(class_model, mdl, top_n: int = 1):
+    # Predict probabilities
+    y_test_pred_prob = class_model.predict(mdl.X_test)
+
+    # Create a DataFrame with precursor_ids, predicted probabilities, and actual labels
+    df_test = pd.DataFrame(
+        {
+            "precursor_id": mdl.precursor_id[mdl.test_indices],
+            "y_pred_prob": y_test_pred_prob.flatten(),
+            "y_true": mdl.y_test,
+        }
+    )
+    if top_n == 1:
+        # For each precursor_id, assign 1 to the highest probability and 0 to the rest
+        df_test["y_pred"] = (
+            df_test.groupby("precursor_id")["y_pred_prob"]
+            .transform(lambda x: x == x.max())
+            .astype(int)
+        )
+    else:
+        # For each precursor_id, assign 1 to the top_n highest probabilities and 0 to the rest
+        df_test["rank"] = df_test.groupby("precursor_id")["y_pred_prob"].rank(
+            method="first", ascending=False
+        )
+        df_test["y_pred"] = (df_test["rank"] <= top_n).astype(int)
+        df_test.drop(columns=["rank"], inplace=True)
+
+    # only keep the true peak of each precursor_id
+    mdl.df_test = df_test.copy()
+    df_test = df_test[df_test["y_true"] == 1]
+
+    # Calculate accuracy
+    accuracy = accuracy_score(df_test["y_true"], df_test["y_pred"])
+
+    return accuracy, df_test
