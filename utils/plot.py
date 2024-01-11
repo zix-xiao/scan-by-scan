@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import seaborn as sns
-from matplotlib_venn import venn2
+from matplotlib_venn import venn2, venn3
 from scipy import stats
 
 
@@ -209,12 +209,40 @@ def plot_venn2(
     label1: str,
     label2: str,
     save_dir: str | None = None,
+    save_format: str = "png",
     title: str | None = None,
 ):
     venn2([set1, set2], set_labels=(label1, label2))
     if title is not None:
         plt.title(title)
-    save_plot(save_dir=save_dir, fig_type_name="VennDiag", fig_spec_name=title)
+    save_plot(
+        save_dir=save_dir,
+        fig_type_name="VennDiag",
+        fig_spec_name=title,
+        format=save_format,
+    )
+
+
+def plot_venn3(
+    set1: Set,
+    set2: Set,
+    set3: Set,
+    label1: str,
+    label2: str,
+    label3: str,
+    save_dir: str | None = None,
+    save_format: str = "png",
+    title: str | None = None,
+):
+    venn3([set1, set2, set3], set_labels=(label1, label2, label3))
+    if title is not None:
+        plt.title(title)
+    save_plot(
+        save_dir=save_dir,
+        fig_type_name="VennDiag",
+        fig_spec_name=title,
+        format=save_format,
+    )
 
 
 def plot_comparison(
@@ -241,13 +269,17 @@ def plot_comparison(
     axs[1].set_ylim([-axs[0].get_ylim()[1], 0])
 
 
-def save_plot(save_dir, fig_type_name, fig_spec_name):
+def save_plot(save_dir, fig_type_name, fig_spec_name, format="png", **kwargs):
     if save_dir is not None:
         if not os.path.exists(save_dir):
             os.makedirs(save_dir)
         plt.savefig(
-            fname=os.path.join(save_dir, fig_type_name + "_" + fig_spec_name + ".png"),
+            fname=os.path.join(
+                save_dir, fig_type_name + "_" + fig_spec_name + "." + format
+            ),
             dpi=300,
+            format=format,
+            **kwargs
         )
         plt.close()
     else:
