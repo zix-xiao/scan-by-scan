@@ -10,7 +10,7 @@ import pandas as pd
 import seaborn as sns
 
 from optimization.dictionary import ExtractPeak
-from utils.plot import plot_scatter, plot_venn2, save_plot
+from utils.plot import plot_scatter, plot_venn2, plot_venn3, save_plot
 
 Logger = logging.getLogger(__name__)
 
@@ -339,6 +339,7 @@ def PlotActivation(
     x_ticks: Literal["time", "scan index"] = "time",
     RT_ref: str = "predicted_RT",
     save_dir=None,
+    save_format: str = "png",
 ):
     EluteRange = [
         MaxquantEntry["Calibrated retention time start"].values[0],
@@ -423,11 +424,15 @@ def PlotActivation(
 
     # Get the legend handles and labels for both axes
     handles1, labels1 = ax1.get_legend_handles_labels()
-    handles2, labels2 = ax2.get_legend_handles_labels()
+    handles = handles1
+    labels = labels1
+    if PrecursorScanCosDist is not None:
+        handles2, labels2 = ax2.get_legend_handles_labels()
 
-    # Merge the legend handles and labels
-    handles = handles1 + handles2
-    labels = labels1 + labels2
+        # Merge the legend handles and labels
+        handles = handles1 + handles2
+    if PrecursorScanCosDist is not None:
+        labels = labels1 + labels2
     plt.legend(handles, labels, bbox_to_anchor=(1.5, 1), loc="upper right")
 
     title = (
@@ -438,14 +443,22 @@ def PlotActivation(
     ax1.set_title(title)
 
     if save_dir is not None:
-        if not os.path.exists(save_dir):
-            os.makedirs(save_dir)
-        plt.savefig(
-            fname=os.path.join(save_dir, title.replace("|", "_") + ".png"),
-            dpi=300,
+        save_plot(
+            save_dir=save_dir,
+            fig_type_name="Activation",
+            fig_spec_name=title.replace("|", "_"),
+            format=save_format,
             bbox_inches="tight",
         )
-        plt.close()
+        # if not os.path.exists(save_dir):
+        #     os.makedirs(save_dir)
+        # plt.savefig(
+        #     fname=os.path.join(save_dir, title.replace("|", "_") + ".png"),
+        #     dpi=300,
+        #     bbox_inches="tight",
+
+        # )
+        # plt.close()
 
     ActivationInRange_df = ActivationInRange
     ActivationInRange_df["Scan index"] = ScanIdx
@@ -682,7 +695,12 @@ class SBSResult:
             **kwargs,
         )
 
-    def plot_overlap_with_MQ(self, save_dir: str | None = None):
+    def plot_overlap_with_MQ(
+        self,
+        save_dir: str | None = None,
+        save_format: str = "png",
+        show_ref: bool = False,
+    ):
         self.exp_df_unique_PCM = (
             self.exp_df.groupby(["Modified sequence", "Charge", "Reverse"])
             .agg(
@@ -702,42 +720,93 @@ class SBSResult:
         self.ref_df_non_zero["precursor"] = self.ref_df_non_zero[
             "Modified sequence"
         ] + self.ref_df_non_zero["Charge"].astype(str)
+        if show_ref:
+            self.ref_df["precursor"] = self.ref_df["Modified sequence"] + self.ref_df[
+                "Charge"
+            ].astype(str)
+            plot_venn3(
+                set1=set(
+                    self.exp_df_unique_PCM.loc[
+                        self.exp_df_unique_PCM["Reverse"] == 0, "precursor"
+                    ].to_list()
+                ),
+                set2=set(
+                    self.ref_df_non_zero.loc[
+                        self.ref_df_non_zero["Reverse"] == 0, "precursor"
+                    ].to_list()
+                ),
+                set3=set(
+                    self.ref_df.loc[self.ref_df["Reverse"] == 0, "precursor"].to_list()
+                ),
+                label1="Maxquant",
+                label2="SBS",
+                label3="Reference",
+                save_dir=save_dir,
+                save_format=save_format,
+                title="IdentificationOfTarget",
+            )
 
-        plot_venn2(
-            set1=set(
-                self.exp_df_unique_PCM.loc[
-                    self.exp_df_unique_PCM["Reverse"] == 0, "precursor"
-                ].to_list()
-            ),
-            set2=set(
-                self.ref_df_non_zero.loc[
-                    self.ref_df_non_zero["Reverse"] == 0, "precursor"
-                ].to_list()
-            ),
-            label1="Maxquant",
-            label2="SBS",
-            save_dir=save_dir,
-            title="IdentificationOfTarget",
-        )
+            plot_venn3(
+                set1=set(
+                    self.exp_df_unique_PCM.loc[
+                        (self.exp_df_unique_PCM["Reverse"] == 0)
+                        & (self.exp_df_unique_PCM["Intensity"] > 0),
+                        "precursor",
+                    ].to_list()
+                ),
+                set2=set(
+                    self.ref_df_non_zero.loc[
+                        self.ref_df_non_zero["Reverse"] == 0, "precursor"
+                    ].to_list()
+                ),
+                set3=set(
+                    self.ref_df.loc[self.ref_df["Reverse"] == 0, "precursor"].to_list()
+                ),
+                label1="Maxquant",
+                label2="SBS",
+                label3="Reference",
+                save_dir=save_dir,
+                save_format=save_format,
+                title="QuantificationOfTarget",
+            )
+        else:
+            plot_venn2(
+                set1=set(
+                    self.exp_df_unique_PCM.loc[
+                        self.exp_df_unique_PCM["Reverse"] == 0, "precursor"
+                    ].to_list()
+                ),
+                set2=set(
+                    self.ref_df_non_zero.loc[
+                        self.ref_df_non_zero["Reverse"] == 0, "precursor"
+                    ].to_list()
+                ),
+                label1="Maxquant",
+                label2="SBS",
+                save_dir=save_dir,
+                save_format=save_format,
+                title="IdentificationOfTarget",
+            )
 
-        plot_venn2(
-            set1=set(
-                self.exp_df_unique_PCM.loc[
-                    (self.exp_df_unique_PCM["Reverse"] == 0)
-                    & (self.exp_df_unique_PCM["Intensity"] > 0),
-                    "precursor",
-                ].to_list()
-            ),
-            set2=set(
-                self.ref_df_non_zero.loc[
-                    self.ref_df_non_zero["Reverse"] == 0, "precursor"
-                ].to_list()
-            ),
-            label1="Maxquant",
-            label2="SBS",
-            save_dir=save_dir,
-            title="QuantificationOfTarget",
-        )
+            plot_venn2(
+                set1=set(
+                    self.exp_df_unique_PCM.loc[
+                        (self.exp_df_unique_PCM["Reverse"] == 0)
+                        & (self.exp_df_unique_PCM["Intensity"] > 0),
+                        "precursor",
+                    ].to_list()
+                ),
+                set2=set(
+                    self.ref_df_non_zero.loc[
+                        self.ref_df_non_zero["Reverse"] == 0, "precursor"
+                    ].to_list()
+                ),
+                label1="Maxquant",
+                label2="SBS",
+                save_dir=save_dir,
+                save_format=save_format,
+                title="QuantificationOfTarget",
+            )
 
     def eval_target_decoy(
         self, ref_col: str = "AUCActivationRaw", save_dir: str | None = None
