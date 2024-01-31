@@ -1,207 +1,26 @@
-from cProfile import label
 import logging
 import os
-from re import T
 from typing import List, Literal, Union
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
+from .compare_maxquant import (
+    merge_with_maxquant_exp,
+    evaluate_rt_overlap,
+    filter_merged_by_rt_overlap,
+    sum_pcm_intensity_from_exp,
+    add_sum_act_cols,
+)
 
-from optimization.dictionary import ExtractPeak
 from utils.plot import plot_scatter, plot_venn2, plot_venn3, save_plot
 
 Logger = logging.getLogger(__name__)
 
 
-def PlotTrueAndPredict(x, prediction, true, log: bool = False):
-    if log:
-        prediction = np.log10(prediction + 1)
-        true = np.log10(true + 1)
-    fig, axs = plt.subplots(2, 1, sharex=True, sharey=True)
-    fig.subplots_adjust(hspace=0)
-
-    axs[0].vlines(x=x, ymin=0, ymax=true)
-    axs[1].vlines(x=x, ymin=0, ymax=prediction)
-
-
-def PlotIsoPatternsAndScan(
-    Maxquant_result,
-    MS1Scans: pd.DataFrame | None = None,
-    infer_intensity: Union[pd.Series, np.ndarray, None] = None,
-    lower_plot: Literal["infer", "obs"] = "obs",
-    scan_idx: Union[int, None] = None,
-    precursor_idx: Union[List[int], None] = None,
-    precursor_id: Union[List[int], None] = None,
-    mzrange: Union[None, list] = None,
-    log_intensity: bool = False,
-    save_dir=None,
-):
-    # preprocess data
-    # TODO: return within scan Pearson and Jaccard distance --> redundant
-    # TODO: return atom composition --> IsoSpecPy incompatibility
-    # TODO: clean code and if possible factorize part of it! --> scan by scan notebook
-
-    # Find precursor index if only precursor id is provided:
-    if precursor_id is not None:
-        precursor_idx = Maxquant_result.loc[
-            Maxquant_result["id"].isin(precursor_id)
-        ].index
-
-    match lower_plot:
-        case "obs":
-            # Find an appropriate scan if not provided
-            if scan_idx is None:
-                if precursor_idx is None:
-                    raise ValueError("Please provide a precursor index.")
-                RT = np.max(
-                    Maxquant_result.loc[precursor_idx, "Retention time"].values
-                )  # take the later RT of the precursors
-                scan_idx = np.abs(MS1Scans["starttime"] - RT).argmin()
-                scan_time = MS1Scans.loc[scan_idx, "starttime"]
-                Logger.info(
-                    "Precursors %s retention time %s, \n show later RT %s with"
-                    " corresponding scan index %s         with scan time %s",
-                    precursor_idx,
-                    Maxquant_result.loc[precursor_idx, "Retention time"].values,
-                    RT,
-                    scan_idx,
-                    scan_time,
-                )
-            OneScan = MS1Scans.iloc[scan_idx, :]
-            OneScanMZ = np.array(OneScan["mzarray"])
-            IsoMZ = None
-
-            # Find the range of mz in MS1 scan to plot
-            if precursor_idx is not None:
-                IsoMZ = Maxquant_result.loc[precursor_idx, "IsoMZ"]
-                IsoMZ_flatten = np.concatenate(IsoMZ.values).ravel()
-                IsoMZ_range = [np.min(IsoMZ_flatten) - 1, np.max(IsoMZ_flatten) + 1]
-                OneScanMZinRange = OneScanMZ[
-                    (OneScanMZ > IsoMZ_range[0]) & (OneScanMZ < IsoMZ_range[1])
-                ]
-                OneScanMZinRangeIdx = np.where(
-                    (OneScanMZ > IsoMZ_range[0]) & (OneScanMZ < IsoMZ_range[1])
-                )[0]
-            else:
-                if not isinstance(mzrange, list):
-                    raise TypeError(
-                        "mzrange should be a list, or provide an int for precursor"
-                        " index."
-                    )
-                OneScanMZinRange = OneScanMZ[
-                    (OneScanMZ > mzrange[0]) & (OneScanMZ < mzrange[1])
-                ]
-                OneScanMZinRangeIdx = np.where(
-                    (OneScanMZ > mzrange[0]) & (OneScanMZ < mzrange[1])
-                )[0]
-
-            # Calculating values for visualization
-            Intensity = np.array(OneScan["intarray"])[OneScanMZinRangeIdx]
-            if log_intensity:  # +1 to avoid divide by zero error
-                Intensity = np.log10(Intensity + 1)
-            peak_results = ExtractPeak(x=OneScanMZinRange, y=Intensity)
-            peaks_idx = peak_results["apex_mzidx"]
-            print("Peak results:")
-            print(peak_results)
-        case "infer":
-            if infer_intensity is None:
-                raise ValueError("please provide infer_intensity.")
-            Intensity = infer_intensity.values
-            if log_intensity:
-                Intensity = np.log10(infer_intensity.values + 1)
-            if precursor_idx is not None:
-                IsoMZ = Maxquant_result.loc[precursor_idx, "IsoMZ"]
-                IsoMZ_flatten = np.concatenate(IsoMZ.values).ravel()
-                IsoMZ_range = [np.min(IsoMZ_flatten) - 1, np.max(IsoMZ_flatten) + 1]
-                InferinRange = Intensity[
-                    (infer_intensity.index > IsoMZ_range[0])
-                    & (infer_intensity.index < IsoMZ_range[1])
-                ]
-                InferinRangeIdx = infer_intensity.index[
-                    (infer_intensity.index > IsoMZ_range[0])
-                    & (infer_intensity.index < IsoMZ_range[1])
-                ]
-
-    # Plot
-    fig, axs = plt.subplots(2, 1, sharex=True, sharey=False)
-    fig.subplots_adjust(hspace=0)
-    if precursor_idx is not None:
-        colormap = plt.cm.bwr  # nipy_spectral, Set1,Paired
-        colors = [colormap(i) for i in np.linspace(0, 1, len(precursor_idx))]
-        for i, precursor in enumerate(precursor_idx):
-            axs[0].vlines(
-                x=Maxquant_result.loc[precursor, "IsoMZ"],
-                ymin=0,
-                ymax=Maxquant_result.loc[precursor, "IsoAbundance"],
-                label=precursor,
-                color=colors[i],
-            )
-            print(
-                "Isotope Pattern:",
-                precursor,
-                Maxquant_result.loc[precursor, "IsoMZ"],
-                Maxquant_result.loc[precursor, "IsoAbundance"],
-            )
-        axs[0].set_title("Up: Isotope Pattern, Down: MS1 Scan " + str(scan_idx))
-    match lower_plot:
-        case "obs":
-            axs[1].vlines(x=OneScanMZinRange, ymin=-Intensity, ymax=0, label="MS peaks")
-            axs[1].hlines(
-                y=-peak_results["peak_height"],
-                xmin=peak_results["start_mz"],
-                xmax=peak_results["end_mz"],
-                linewidth=2,
-                color="black",
-            )
-            axs[1].vlines(
-                x=OneScanMZinRange[peaks_idx],
-                ymin=-Intensity[peaks_idx],
-                ymax=0,
-                color="orange",
-                label="inferred apex",
-            )
-            axs[1].plot(
-                OneScanMZinRange[peaks_idx],
-                -Intensity[peaks_idx],
-                "x",
-                color="orange",
-                label="inferred apex",
-            )
-        case "infer":
-            Logger.debug(
-                "infer m/z and intensities: %s, %s", InferinRangeIdx, InferinRange
-            )
-            axs[1].vlines(  # x = infer_intensity.index,
-                x=InferinRangeIdx,
-                ymin=-InferinRange,
-                ymax=0,
-                label="inferred intensity",
-            )
-            axs[1].set_xlim(IsoMZ_range)
-    fig.legend(loc="center right", bbox_to_anchor=(1.15, 0.5))
-
-    # save result
-    if save_dir is not None:
-        if not os.path.exists(save_dir):
-            os.makedirs(save_dir)
-        figname = (
-            "SpecAndIsoPatterns_scan"
-            + str(scan_idx)
-            + "_precursor"
-            + str(precursor_idx)
-            + ".png"
-        )
-        plt.savefig(fname=os.path.join(save_dir, figname), dpi=300)
-        plt.close()
-    else:
-        plt.show()
-
-    return None
-
-
-def ReportInensity(intensity: pd.Series, save_dir: Union[str, None]):
+def _report_intensity(intensity: pd.Series, save_dir: Union[str, None]):
+    """Report the distribution of a given intensity column"""
     print("--------------", intensity.name, "-----------------")
     n_MQ_nonzero = intensity[intensity > 1].count()  # always filter at 1
     print("Non zero intensity in", intensity.name, "=", n_MQ_nonzero)
@@ -216,7 +35,10 @@ def ReportInensity(intensity: pd.Series, save_dir: Union[str, None]):
         plt.close()
 
 
-def ReportDistr(data: pd.Series, suffix: Union[str, None], save_dir: Union[str, None]):
+def _report_distr(
+    data: pd.Series, suffix: Union[str, None], save_dir: Union[str, None]
+):
+    """report the distribution of a given column"""
     name = str(data.name)
     if suffix is not None:  # add suffix to name if desired
         name += "_" + suffix
@@ -231,15 +53,14 @@ def ReportDistr(data: pd.Series, suffix: Union[str, None], save_dir: Union[str, 
         plt.close()
 
 
-def GenerateResultReport(
+def generate_result_report(
     scan_record: pd.DataFrame,
-    # emptyScans:pd.DataFrame,
-    # NonEmptyScans:pd.DataFrame,
     intensity_cols: list,
     save_dir: Union[str, None] = None,
 ):
+    """Generate a report for the result of SBS"""
     for col in intensity_cols:
-        ReportInensity(intensity=col, save_dir=save_dir)
+        _report_intensity(intensity=col, save_dir=save_dir)
 
     scan_record["n_CandidateByRT"] = scan_record["CandidatePrecursorByRT"].apply(
         lambda x: len(x) if x is not None else 0
@@ -251,8 +72,8 @@ def GenerateResultReport(
         scan_record["n_filteredCandidate"] / scan_record["n_CandidateByRT"]
     )
 
-    emptyScans = scan_record.loc[scan_record["n_filteredCandidate"] <= 1]
-    NonEmptyScans = scan_record.loc[scan_record["n_filteredCandidate"] > 1]
+    empty_scans = scan_record.loc[scan_record["n_filteredCandidate"] <= 1]
+    non_empty_scans = scan_record.loc[scan_record["n_filteredCandidate"] > 1]
     print("--------------Empty Scans-----------------")
     for i in [
         "Time",
@@ -261,7 +82,7 @@ def GenerateResultReport(
         "preservedRatio_IE_filter",
     ]:
         try:
-            ReportDistr(data=emptyScans[i], suffix="EmptyScans", save_dir=save_dir)
+            _report_distr(data=empty_scans[i], suffix="EmptyScans", save_dir=save_dir)
         except:
             print("Column ", i, "does not exist!")
 
@@ -277,13 +98,13 @@ def GenerateResultReport(
         "NumberHighlyCorrDictCandidate",
     ]:
         try:
-            ReportDistr(
-                data=NonEmptyScans[i], suffix="nonEmptyScans", save_dir=save_dir
+            _report_distr(
+                data=non_empty_scans[i], suffix="nonEmptyScans", save_dir=save_dir
             )
         except:
             print("Column ", i, "does not exist!")
 
-    sns.lineplot(x=NonEmptyScans["Time"], y=NonEmptyScans["Cosine Dist"])
+    sns.lineplot(x=non_empty_scans["Time"], y=non_empty_scans["Cosine Dist"])
     plt.title("Cosine Distance By Scan")
     if save_dir is not None:
         plt.savefig(os.path.join(save_dir, "cos_dist_byscan.png"), dpi=300)
@@ -292,25 +113,27 @@ def GenerateResultReport(
     return scan_record
 
 
-def PlotCorr(
-    ReferenceIntensity,
-    SumActivation,
+def plot_corr_int_ref_and_act(
+    ref_int,
+    sum_act,
     data=None,
     filter_thres: float = 1,
     interactive: bool = False,
     show_diag: bool = True,
     color: Union[None, pd.Series] = None,
-    hover_data: Union[None, List] = [
-        "Modified sequence",
-        "Leading proteins",
-        "Charge",
-        "id",
-    ],
+    hover_data: Union[None, List] = None,
     save_dir: Union[None, str] = None,
 ):
-    RegressionIntensity, AbsResidue, valid_idx = plot_scatter(
-        x=ReferenceIntensity,
-        y=SumActivation,
+    if hover_data is None:
+        hover_data = [
+            "Modified sequence",
+            "Leading proteins",
+            "Charge",
+            "id",
+        ]
+    reg_int, abs_residue, valid_idx = plot_scatter(
+        x=ref_int,
+        y=sum_act,
         log_x=True,
         log_y=True,
         data=data,
@@ -324,156 +147,7 @@ def PlotCorr(
         x_label="Reference (log)",
         y_label="Infered (log)",
     )
-    return RegressionIntensity, AbsResidue, valid_idx
-
-
-def PlotActivation(
-    MaxquantEntry: pd.Series,
-    PrecursorTimeProfiles: list,
-    PrecursorScanCosDist: list | None,
-    PrecursorTimeProfileLabels: list,
-    PrecursorScanCosDistLabels: list | None,
-    MS1ScansNoArray: pd.DataFrame,
-    RT_tol: float = 0.0,
-    log_intensity: bool = False,
-    x_ticks: Literal["time", "scan index"] = "time",
-    RT_ref: str = "predicted_RT",
-    save_dir=None,
-    save_format: str = "png",
-):
-    EluteRange = [
-        MaxquantEntry["Calibrated retention time start"].values[0],
-        MaxquantEntry["Calibrated retention time finish"].values[0],
-    ]
-    RTrange = [
-        MaxquantEntry[RT_ref].values[0] - RT_tol,
-        MaxquantEntry[RT_ref].values[0] + RT_tol,
-    ]
-    Logger.debug("RTrange: %s", RTrange)
-    ScanIdx = MS1ScansNoArray[
-        (MS1ScansNoArray["starttime"] >= RTrange[0])
-        & (MS1ScansNoArray["starttime"] <= RTrange[1])
-    ].index
-    Logger.debug("ScanIdx: %s", ScanIdx)
-    TimeProfiles = pd.DataFrame(
-        dict(zip(PrecursorTimeProfileLabels, PrecursorTimeProfiles))
-    )
-    TimeProfiles = TimeProfiles.set_index(MS1ScansNoArray["starttime"])
-    ActivationInRange = TimeProfiles.iloc[ScanIdx, :]
-
-    if log_intensity:
-        ActivationInRange = np.log10(ActivationInRange + 1)
-
-    fig, ax1 = plt.subplots()
-    sns.scatterplot(data=ActivationInRange, legend=False, ax=ax1)  # type: ignore
-    sns.lineplot(
-        data=ActivationInRange,
-        legend=False,
-        ax=ax1,
-        # color="green",
-        # label="activation",
-    )
-
-    # experimental RT range
-    for x in EluteRange:
-        ax1.axvline(x=x, linewidth=2, color="black", label="dict RT range")
-    ax1.axvline(
-        x=MaxquantEntry["Retention time"].values[0],
-        linewidth=2,
-        color="grey",
-        label="dict RT",
-    )
-
-    Logger.info(
-        "dict RT can be either from reference file or from experiment file, depending"
-        " on the MaxquantEntry specified."
-    )
-
-    # reference RT for reconstruction
-    for x in RTrange:
-        ax1.axvline(x=x, linewidth=2, color="red", label="SBS_RT_tol")
-    ax1.axvline(
-        x=MaxquantEntry[RT_ref].values[0],
-        linewidth=2,
-        color="orange",
-        label="SBS_RT_ref",
-    )
-
-    if PrecursorScanCosDist is not None:
-        CosDist = pd.DataFrame(
-            dict(zip(PrecursorScanCosDistLabels, PrecursorScanCosDist))
-        )
-        CosDist = CosDist.set_index(MS1ScansNoArray["starttime"])
-        CosDistInRange = CosDist.iloc[ScanIdx, :]
-        CosDist = CosDist.replace(0, np.nan)
-        # print(CosDist)
-        ax2 = ax1.twinx()
-        # sns.scatterplot(data=CosDistInRange, legend=False, ax=ax2)
-        sns.lineplot(
-            data=CosDistInRange,
-            ax=ax2,
-            legend=False,
-            palette=["pink", "yellow", "brown"],
-            label="cos dist",
-        )
-        ax2.set_ylabel("cosine distance")
-
-    # plt.legend(title="Smoothing", bbox_to_anchor=(1.5, 1), loc="upper right", ax = ax1)
-    ax1.set_xlabel("Time (Minutes)")
-    ax1.set_ylabel("Activation")
-
-    # Get the legend handles and labels for both axes
-    handles1, labels1 = ax1.get_legend_handles_labels()
-    handles = handles1
-    labels = labels1
-    if PrecursorScanCosDist is not None:
-        handles2, labels2 = ax2.get_legend_handles_labels()
-
-        # Merge the legend handles and labels
-        handles = handles1 + handles2
-    if PrecursorScanCosDist is not None:
-        labels = labels1 + labels2
-    plt.legend(handles, labels, bbox_to_anchor=(1.5, 1), loc="upper right")
-
-    title = (
-        MaxquantEntry["Modified sequence"].values[0]
-        + ", "
-        + str(MaxquantEntry["Charge"].values[0])
-    )
-    ax1.set_title(title)
-
-    if save_dir is not None:
-        save_plot(
-            save_dir=save_dir,
-            fig_type_name="Activation",
-            fig_spec_name=title.replace("|", "_"),
-            format=save_format,
-            bbox_inches="tight",
-        )
-        # if not os.path.exists(save_dir):
-        #     os.makedirs(save_dir)
-        # plt.savefig(
-        #     fname=os.path.join(save_dir, title.replace("|", "_") + ".png"),
-        #     dpi=300,
-        #     bbox_inches="tight",
-
-        # )
-        # plt.close()
-
-    ActivationInRange_df = ActivationInRange
-    ActivationInRange_df["Scan index"] = ScanIdx
-    ActivationInRange_df = ActivationInRange_df.reset_index()
-    if x_ticks == "scan index":
-        x, loc = plt.xticks()
-        print(loc)
-        plt.xticks(
-            x,
-            ActivationInRange_df.loc[
-                ActivationInRange_df["starttime"].isin(x), "Scan index"
-            ].values,
-        )
-        plt.xlabel("Scan index")
-    return ActivationInRange_df
+    return reg_int, abs_residue, valid_idx
 
 
 def FindStartAndEndScan(activation: np.ndarray, thres: float = 1.0):
@@ -537,112 +211,33 @@ def plot_alphas_across_scan(
     plt.title("Best Alpha over " + x)
 
 
-def compare_act_sum_with_MQ(
-    MQ_exp: pd.DataFrame,
-    MQ_dict: pd.DataFrame,
-    RT_tol: float,
-    MQ_dict_sum_act_col: list,
-    return_ori_merge: bool = False,
-):
-    """compare the inferred intensities from maxquant and SBS,
-        when a different dictionary then experiment MQ result is used
-
-    :MQ_exp: the maxquant result of the raw data whose MS1 scans were used for inference
-    :MQ_dict: the maxquant result used for SBS inference
-    :RT_tol: the RT tolerence used for SBS inference
-    """
-
-    # MQ_dict = MQ_dict[['Modified sequence', 'Charge', 'predicted_RT', 'SumActivation']]
-    MQ_merged_dict = pd.merge(
-        left=MQ_dict[["Modified sequence", "Charge", "predicted_RT", "id"]],
-        right=MQ_exp[
-            [
-                "Modified sequence",
-                "Charge",
-                "Calibrated retention time start",
-                "Calibrated retention time finish",
-                "Calibrated retention time",
-                "Retention time",
-                "Intensity",
-            ]
-        ],
-        on=["Modified sequence", "Charge"],
-        how="right",
-        indicator=True,
-    )
-    Logger.debug("Maxquant experiment file has %s entries.", MQ_exp.shape[0])
-    Logger.debug("columns after merge MQ dict and MQ exp %s", MQ_merged_dict.columns)
-    MQ_merged_dict["RT_diff"] = (
-        MQ_merged_dict["predicted_RT"] - MQ_merged_dict["Retention time"]
-    )
-
-    MQ_merged_filtered_RT = MQ_merged_dict.loc[abs(MQ_merged_dict["RT_diff"]) <= RT_tol]
-    Logger.debug(
-        "Keeping %s entries with RT difference within %s",
-        MQ_merged_filtered_RT.shape[0],
-        RT_tol,
-    )
-    Logger.debug("columns after filter by RT %s", MQ_merged_filtered_RT.columns)
-
-    MQ_merged_filtered_RT_sum_intensity = (
-        MQ_merged_filtered_RT.groupby(["Modified sequence", "Charge"])
-        .agg(
-            {
-                "Calibrated retention time start": "min",
-                "Calibrated retention time finish": "max",
-                "Calibrated retention time": "median",
-                "Retention time": "median",
-                "Intensity": "sum",
-                "id": "first",
-            }
-        )
-        .reset_index()
-    )
-    Logger.debug(
-        "Aggregate by Modified sequence and Charge, keeping %s entries",
-        MQ_merged_filtered_RT_sum_intensity.shape[0],
-    )
-    Logger.debug("columns after agg %s", MQ_merged_filtered_RT_sum_intensity.columns)
-
-    MQ_merged_final = pd.merge(
-        left=MQ_dict[
-            ["Modified sequence", "Charge", "predicted_RT"] + MQ_dict_sum_act_col
-        ],
-        right=MQ_merged_filtered_RT_sum_intensity,
-        on=["Modified sequence", "Charge"],
-        how="right",
-    )
-    MQ_merged_final["id"] = MQ_merged_final["id"].astype(int)
-    if return_ori_merge:
-        return MQ_merged_final, MQ_merged_dict
-    else:
-        return MQ_merged_final
-
-
 class SBSResult:
+    """SBSResult class for result analysis"""
+
     def __init__(
         self,
-        ref_df: pd.DataFrame,
-        exp_df: pd.DataFrame,
-        RT_tol: float,
+        maxquant_ref_df: pd.DataFrame,
+        maxquant_exp_df: pd.DataFrame | None = None,
         sum_raw: pd.DataFrame | None = None,
         sum_gaussian: pd.DataFrame | None = None,
         sum_minima: pd.DataFrame | None = None,
         sum_peak: pd.DataFrame | None = None,
-        SumActCol: List[str] | None = None,
+        sum_cols: List[str] | None = None,
     ) -> None:
+        """Initialize SBSResult object and intergrate all activation data."""
+
         assert any(
             item is not None for item in [sum_raw, sum_peak, sum_gaussian, sum_minima]
         )
         sum_cols = []
-        for sum in [sum_raw, sum_peak, sum_gaussian, sum_minima]:
-            if sum is not None:
-                sum.reset_index(drop=True, inplace=True)
-                sum_cols += list(sum.columns)
-        if SumActCol is None:
-            self.SumActCol = sum_cols
+        for s in [sum_raw, sum_peak, sum_gaussian, sum_minima]:
+            if s is not None:
+                s.reset_index(drop=True, inplace=True)
+                sum_cols += list(s.columns)
+        if sum_cols is None:
+            self.sum_cols = sum_cols
         else:
-            self.SumActCol = SumActCol
+            self.sum_cols = sum_cols
         pp_sumactivation = pd.concat(
             [
                 sum_raw,
@@ -652,30 +247,59 @@ class SBSResult:
             ],
             axis=1,
         )
+        pp_sumactivation = pp_sumactivation.set_index(maxquant_ref_df.index)
 
-        pp_sumactivation = pp_sumactivation.set_index(ref_df.index)
-        self.ref_df = pd.concat([ref_df, pp_sumactivation], axis=1)
-        self.ref_df["Reverse"] = np.where(ref_df["Reverse"].isnull(), 0, 1)
-        self.exp_df = exp_df.copy()
-        self.exp_df["Reverse"] = np.where(exp_df["Reverse"].isnull(), 0, 1)
-        self.ref_exp_df_inner, self.ref_exp_df_outer = compare_act_sum_with_MQ(
-            MQ_dict=self.ref_df,
-            MQ_exp=self.exp_df,
-            RT_tol=RT_tol,
-            MQ_dict_sum_act_col=self.SumActCol,
-            return_ori_merge=True,
+        self.ref_df = pd.concat([maxquant_ref_df, pp_sumactivation], axis=1)
+        self.ref_df["Reverse"] = np.where(maxquant_ref_df["Reverse"].isnull(), 0, 1)
+        self.exp_df = maxquant_exp_df.copy()
+        self.exp_df["Reverse"] = np.where(maxquant_exp_df["Reverse"].isnull(), 0, 1)
+
+        self.ref_exp_df_inner = None
+        self.ref_df_non_zero = self.ref_df.loc[self.ref_df[self.sum_cols[0]] > 0, :]
+
+    def compare_with_maxquant_exp_int(
+        self,
+        filter_by_rt_overlap: List[
+            Literal["full_overlap", "partial_overlap", "no_overlap"]
+        ]  # TODO: refactor to the same place as compare_maxquant
+        | None = None,
+    ):
+        """Compare activation with the intensity of the precursors from the experiment file"""
+        maxquant_ref_and_exp = merge_with_maxquant_exp(
+            maxquant_exp_df=self.exp_df, maxquant_ref_df=self.ref_df
+        )
+
+        maxquant_ref_and_exp = evaluate_rt_overlap(maxquant_ref_and_exp)
+        if filter_by_rt_overlap is not None:
+            assert evaluate_rt_overlap is True
+            maxquant_ref_and_exp = filter_merged_by_rt_overlap(
+                condition=filter_by_rt_overlap,
+                maxquant_ref_and_exp=maxquant_ref_and_exp,
+            )
+        else:
+            Logger.info(
+                "No filter_by_rt_overlap is specified, use all entries for plotting."
+            )
+
+        maxquant_ref_and_exp_sum_intensity = sum_pcm_intensity_from_exp(
+            maxquant_ref_and_exp
+        )
+
+        maxquant_ref_and_exp_sum_intensity_act = add_sum_act_cols(
+            maxquant_ref_and_exp_sum_intensity, self.sum_cols, self.ref_df
         )
         try:
-            self.ref_df_non_zero = self.ref_df.loc[
-                self.ref_df["SumActivationRaw"] > 0, :
+            self.ref_exp_df_inner = maxquant_ref_and_exp_sum_intensity_act.loc[
+                maxquant_ref_and_exp_sum_intensity_act["SumActivationRaw"] > 0, :
             ]
-        except:
-            Logger.warn(
+        except KeyError:
+            Logger.info(
                 "SumActivationRaw column does not exist, use %s for generating"
-                " ref_df_non_zero."
+                " ref_exp_df_inner",
+                self.sum_cols[0],
             )
-            self.ref_df_non_zero = self.ref_df.loc[
-                self.ref_df[self.SumActCol[0]] > 0, :
+            self.ref_exp_df_inner = maxquant_ref_and_exp_sum_intensity_act.loc[
+                maxquant_ref_and_exp_sum_intensity[self.sum_cols[0]] > 0, :
             ]
 
     def plot_intensity_corr(
@@ -686,7 +310,8 @@ class SBSResult:
         save_dir: str | None = None,
         **kwargs,
     ):
-        RegIntensity, AbsResidue, valid_idx = PlotCorr(
+        """Plot the correlation between the intensity from the experiment file and the activation columns"""
+        reg_int, abs_residue, valid_idx = plot_corr_int_ref_and_act(
             self.ref_exp_df_inner[ref_col],
             self.ref_exp_df_inner[inf_col],
             data=self.ref_exp_df_inner,
@@ -814,7 +439,7 @@ class SBSResult:
         self.TDC_table = self.ref_df_non_zero.groupby("Reverse").agg(
             {"id": "count", ref_col: "mean"}
         )
-        fig, axs = plt.subplots(ncols=3, width_ratios=[1, 1, 2], figsize=(12, 5))
+        _, axs = plt.subplots(ncols=3, width_ratios=[1, 1, 2], figsize=(12, 5))
         sns.countplot(data=self.ref_df_non_zero, x="Reverse", ax=axs[0])
         axs[0].bar_label(axs[0].containers[0])
         sns.barplot(

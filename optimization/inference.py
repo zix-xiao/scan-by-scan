@@ -11,32 +11,26 @@ from scipy import spatial
 
 from sklearn.decomposition import sparse_encode
 from sklearn.metrics import (
-    PrecisionRecallDisplay,
     classification_report,
     confusion_matrix,
     mean_squared_error,
 )
 
-from optimization.dictionary import Dict, _AlignMethods
-from result_analysis.result_analysis import PlotIsoPatternsAndScan
-from utils.plot import plot_comparison
+from optimization.dictionary import Dict
+from utils.plot import plot_comparison, plot_isopattern_and_obs
+from utils.config import _algo, _alpha_criteria, _alpha_opt_metric, _loss, _pp_method
 from optimization.custom_models import CustomLinearModel, mean_square_root_error
 
 Logger = logging.getLogger(__name__)
-
-_alpha_opt_metric = Literal["cos_dist", "RMSE"]
-_loss = Literal["lasso", "sqrt_lasso"]
-_algo = Literal["lasso_lars", "lasso_cd", "lars", "omp", "threshold"]
-_alpha_criteria = Literal["min", "convergence"]
-_pp_method = Literal["raw", "sqrt"]
 
 
 class Quant:
     """
     Joint identification and quantification of candidates for given MS1 scan
 
-    :preprocessing: if CandidateDict and obs_data are preprocessed, if 'sqrt'
-                    then act should be squared, and cos_dist calculation should also be squared
+    :preprocessing: if CandidateDict and obs_data are preprocessed, if 'sqrt' \
+        then act should be squared, and cos_dist calculation should also be \
+            squared
     """
 
     def __init__(
@@ -147,61 +141,66 @@ class Quant:
                 metric=metric,
                 max_iter=max_iter,
             )
-
-        match criteria:
-            case "min":
-                for a in alphas:
-                    self.optimize(
-                        alpha=a,
-                        loss=loss,
-                        algorithm=algorithm,
-                        metric=metric,
-                        max_iter=max_iter,
-                    )
-                BestAlphaIdx = np.array(self.metric).argmin()
-                self.best_alpha = self.alphas[BestAlphaIdx]
-                Logger.info("Minimal distance reached at alpha = %s", self.best_alpha)
-            case "convergence":
-                BestAlphaIdx = None
-                for a in alphas:
-                    Logger.debug("Current alpha = %s", a)
-                    self.optimize(
-                        alpha=a,
-                        loss=loss,
-                        metric=metric,
-                        algorithm=algorithm,
-                        max_iter=max_iter,
-                    )
-                    Logger.debug("Alpha list %s", self.alphas)
-                    diff = self.metric[-2] - self.metric[-1]
-                    Logger.debug("Alpha = %s, tol = %s", a, diff)
-                    if diff <= eps and diff > 0:
-                        BestAlphaIdx = self.alphas.index(a)
-                        self.best_alpha = self.alphas[BestAlphaIdx]
-                        Logger.info(
-                            "Reached convergence criteria at alpha = %s",
-                            self.best_alpha,
+        if len(alphas) > 0:
+            match criteria:
+                case "min":
+                    for a in alphas:
+                        self.optimize(
+                            alpha=a,
+                            loss=loss,
+                            algorithm=algorithm,
+                            metric=metric,
+                            max_iter=max_iter,
                         )
-                        break
-                    if diff < 0:
-                        BestAlphaIdx = alphas.index(a) - 1
-                        self.best_alpha = self.alphas[BestAlphaIdx]
-                        Logger.warning(
-                            "Increasing %s! Using previous alpha = %s as best"
-                            " candidate!",
-                            self.metric_used,
-                            self.best_alpha,
-                        )
-                        break
-                if BestAlphaIdx is None:
                     BestAlphaIdx = np.array(self.metric).argmin()
                     self.best_alpha = self.alphas[BestAlphaIdx]
-                    Logger.warning(
-                        "Convergence not reached! Using alpha = %s with minimal"
-                        " distance as candidate!",
-                        self.best_alpha,
+                    Logger.info(
+                        "Minimal distance reached at alpha = %s", self.best_alpha
                     )
-
+                case "convergence":
+                    BestAlphaIdx = None
+                    for a in alphas:
+                        Logger.debug("Current alpha = %s", a)
+                        self.optimize(
+                            alpha=a,
+                            loss=loss,
+                            metric=metric,
+                            algorithm=algorithm,
+                            max_iter=max_iter,
+                        )
+                        Logger.debug("Alpha list %s", self.alphas)
+                        diff = self.metric[-2] - self.metric[-1]
+                        Logger.debug("Alpha = %s, tol = %s", a, diff)
+                        if diff <= eps and diff > 0:
+                            BestAlphaIdx = self.alphas.index(a)
+                            self.best_alpha = self.alphas[BestAlphaIdx]
+                            Logger.info(
+                                "Reached convergence criteria at alpha = %s",
+                                self.best_alpha,
+                            )
+                            break
+                        if diff < 0:
+                            BestAlphaIdx = alphas.index(a) - 1
+                            self.best_alpha = self.alphas[BestAlphaIdx]
+                            Logger.warning(
+                                "Increasing %s! Using previous alpha = %s as best"
+                                " candidate!",
+                                self.metric_used,
+                                self.best_alpha,
+                            )
+                            break
+                    if BestAlphaIdx is None:
+                        BestAlphaIdx = np.array(self.metric).argmin()
+                        self.best_alpha = self.alphas[BestAlphaIdx]
+                        Logger.warning(
+                            "Convergence not reached! Using alpha = %s with minimal"
+                            " distance as candidate!",
+                            self.best_alpha,
+                        )
+        else:
+            BestAlphaIdx = 0
+            self.best_alpha = self.alphas[BestAlphaIdx]
+            Logger.info("Alpha not specified, using alpha = %s", self.best_alpha)
         self.infer = self.inferences[BestAlphaIdx]
         self.act = self.acts[BestAlphaIdx]
 
@@ -317,7 +316,7 @@ class Quant:
         precursor_idx: List[int] | None = None,
         log_intensity: bool = False,
     ):
-        PlotIsoPatternsAndScan(
+        plot_isopattern_and_obs(
             Maxquant_result=Maxquant_result,
             infer_intensity=pd.Series(data=self.infer[0], index=self.obs_mz),
             lower_plot="infer",
@@ -351,7 +350,8 @@ def process_one_scan(
     plot_obs_and_infer: bool = False,
 ):
     """
-    process one scan using lasso regression, return  alignment, activation and scan summary
+    process one scan using lasso regression, return  alignment, \
+        activation and scan summary
 
     :scan_idx:
     :OneScan: a row in dataframe MS1Scans
