@@ -9,23 +9,17 @@
 
 
 #mzML='/cmnfs/proj/ORIGINS/data/protMSD/GCF_profile/msconvert_profile.mzML'
-mzML='/cmnfs/proj/ORIGINS/data/ecoli/ss/DDA/raw/msconvert/BBM_647_P241_02_07_ssDDA_MIA_001.mzML'
-maxquant='/cmnfs/proj/ORIGINS/data/ecoli/HpHRP/MQ/1FDR/combined/txt/evidence_1_FilteredByClosestRT_transfer_RT_pred_filtered_withIso_expRT.pkl'
-maxquant_exp='/cmnfs/proj/ORIGINS/data/ecoli/ss/DDA/MQ/combined/txt/evidence_1.txt'
+config_path='/cmnfs/proj/ORIGINS/protMSD/maxquant/ScanByScan/utils/sbs_config.json'
+# mzML='/cmnfs/proj/ORIGINS/data/ecoli/ss/DDA/raw/msconvert/BBM_647_P241_02_07_ssDDA_MIA_001.mzML'
+# maxquant='/cmnfs/proj/ORIGINS/data/ecoli/ss/DDA/MQ/combined/txt/evidence_1_1_FilteredByClosestRT_transfer_RT_pred_filtered_withIso_expRTrange.pkl'
+# maxquant_exp='/cmnfs/proj/ORIGINS/data/ecoli/ss/DDA/MQ/combined/txt/evidence_1.txt'
 #maxquant='/cmnfs/proj/ORIGINS/data/protMSD/GCF_profile/combined/txt/evidence_transfer_RT_pred_filtered_withIso.pkl'
 
 ## printing shell variables is complicated by escaping
 source $HOME/condaInit.sh
 conda activate sbs
-python /cmnfs/proj/ORIGINS/protMSD/maxquant/ScanByScan/ScanByScan.py \
---mzml_path=$mzML \
---MQ_ref_path=$maxquant \
---RT_tol=1.0 \
---opt-algo='lasso_cd' \
---RT_ref='pred' \
---MQ_exp_path=$maxquant_exp \
---notes='1FDR_' \
---PS_cos_dist='True' || exit 91
+python /cmnfs/proj/ORIGINS/protMSD/maxquant/ScanByScan/sbs_runner.py \
+--config_path=$config_path || exit 91
 
 echo "Script finished"
 exit 0
