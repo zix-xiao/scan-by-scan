@@ -10,3 +10,5 @@ notebooks/my_dir/*
 test/test.py
 output.png
 output.svg.png
+archieved/*
+
