@@ -1,7 +1,10 @@
+""" Module for comparing with maxquant results """
 import logging
 from typing import Literal, List
 import pandas as pd
-
+import matplotlib.pyplot as plt
+from utils.plot import save_plot
+from utils.tools import _perc_fmt
 
 Logger = logging.getLogger(__name__)
 
@@ -50,7 +53,9 @@ def merge_with_maxquant_exp(
     return maxquant_ref_and_exp
 
 
-def evaluate_rt_overlap(maxquant_ref_and_exp: pd.DataFrame):
+def evaluate_rt_overlap(
+    maxquant_ref_and_exp: pd.DataFrame, save_dir: str | None = None
+):
     """evaluate the RT overlap between the experiment and reference file"""
 
     def _categorize_ranges(row):
@@ -73,6 +78,12 @@ def evaluate_rt_overlap(maxquant_ref_and_exp: pd.DataFrame):
     Logger.info(
         "RT overlap counts: %s", maxquant_ref_and_exp["RT_overlap"].value_counts()
     )
+    plt.pie(
+        maxquant_ref_and_exp["RT_overlap"].value_counts().values,
+        labels=maxquant_ref_and_exp["RT_overlap"].value_counts().index,
+        autopct=lambda x: _perc_fmt(x, maxquant_ref_and_exp.shape[0]),
+    )
+    save_plot(save_dir=save_dir, fig_type_name="PieChart_", fig_spec_name="RT_overlap")
     return maxquant_ref_and_exp
 
 
@@ -101,7 +112,10 @@ def filter_merged_by_rt_overlap(
 
 
 def sum_pcm_intensity_from_exp(maxquant_ref_and_exp: pd.DataFrame):
-    """sum the intensity of the precursors from the experiment file"""
+    """sum the intensity of the precursors from the experiment file
+
+    In case of multiple PCM start and finish are the RT range of the precursor
+    """
     n_pre_agg = maxquant_ref_and_exp.shape[0]
     maxquant_ref_and_exp_sum_intensity = (
         maxquant_ref_and_exp.groupby(["Modified sequence", "Charge"])
@@ -141,8 +155,6 @@ def add_sum_act_cols(
         on=["Modified sequence", "Charge"],
         how="right",
     )
-    maxquant_ref_and_exp_sum_intensity_act[
-        "id"
-    ] = maxquant_ref_and_exp_sum_intensity_act["id"].astype(int)
+    # empty field in 'id' because some entries are in ss but not in exp.
 
     return maxquant_ref_and_exp_sum_intensity_act

@@ -1,13 +1,19 @@
 import os
 import logging
+from typing import List
 from pyteomics import mzml
 import numpy as np
 import pandas as pd
 from Bio.SeqIO.FastaIO import SimpleFastaParser
 from scipy.sparse import csr_matrix
 from scipy.signal import find_peaks, peak_widths
+from scipy.spatial import cKDTree
 
 Logger = logging.getLogger(__name__)
+
+
+def _perc_fmt(x, total):
+    return f"{x:.1f}%\n{total * x / 100:.0f}"
 
 
 def ExtractPeak(
@@ -47,6 +53,25 @@ def ExtractPeak(
         )
     else:
         return peak_result
+
+
+def match_time_to_scan(
+    df: pd.DataFrame, time_cols: List[str], ms1scans_no_array: pd.DataFrame
+):
+    """Match the time values in the dataframe to the scan numbers in the ms1scans_no_array"""
+    # Build a KDTree from the starttime values
+    tree = cKDTree(ms1scans_no_array[["starttime"]])
+
+    for time_col in time_cols:
+        time_scan_col = time_col + "_scan"
+
+        # Query the tree for the nearest neighbor to each time value
+        _, indices = tree.query(df[[time_col]].values)
+
+        # Use the indices to get the corresponding scan numbers
+        df[time_scan_col] = ms1scans_no_array.iloc[indices]["scan_number"].values
+
+    return df
 
 
 def load_mzml(msconvert_file: str):

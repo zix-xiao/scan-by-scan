@@ -15,6 +15,49 @@ from .tools import ExtractPeak
 Logger = logging.getLogger(__name__)
 
 
+def plot_pie(
+    sizes: np.ndarray,
+    labels: np.ndarray,
+    title: str,
+    save_dir: str | None = None,
+    fig_spec_name: str | None = None,
+    accumulative_threshold: float | None = None,
+):
+    """plot pie charts with accumulative threshold"""
+    fig1, ax1 = plt.subplots()
+    if accumulative_threshold is not None:
+        # Sort sizes in descending order and get the sorted labels
+        sorted_indices = np.argsort(sizes)[::-1]
+        sorted_sizes = sizes[sorted_indices]
+        sorted_labels = labels[sorted_indices]
+
+        # Calculate cumulative sum
+        cumulative_sizes = np.cumsum(sorted_sizes)
+
+        # Find the index where cumulative sum exceeds 95% of the total
+        idx = np.where(cumulative_sizes >= accumulative_threshold * cumulative_sizes[-1])[0][0]
+
+        # Include only the segments needed to reach 95% of the total
+        sizes = sorted_sizes[: idx + 1]
+        labels = sorted_labels[: idx + 1]
+
+        # Add 'Others' segment if there are remaining sizes
+        if idx < len(sorted_sizes) - 1:
+            sizes = np.append(sizes, sum(sorted_sizes[idx + 1 :]))
+            labels = np.append(labels, 'Others')
+
+    ax1.pie(sizes, labels=labels, autopct="%1.1f%%", startangle=90)
+    ax1.axis("equal")  # Equal aspect ratio ensures that pie is drawn as a circle.
+    ax1.set_title(title)
+    save_plot(
+        save_dir=save_dir,
+        fig_type_name="PieChart",
+        fig_spec_name=fig_spec_name,
+        format="png",
+        bbox_inches="tight",
+    )
+
+
 def plot_scatter(
     x: pd.Series,
     y: pd.Series,
