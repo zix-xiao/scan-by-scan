@@ -1,6 +1,5 @@
 import logging
 import pathlib
-import random
 from typing import Literal, Union, List
 
 import matplotlib.pyplot as plt
@@ -12,7 +11,6 @@ from keras.layers import (
     Conv1D,
     Dense,
     Dropout,
-    Embedding,
     GlobalMaxPooling1D,
     Masking,
 )
@@ -20,19 +18,20 @@ from keras.losses import BinaryCrossentropy
 from keras.models import Sequential
 from keras.optimizers import Adam
 from numba import jit
-from scipy.spatial import cKDTree
+
 from sklearn.metrics import accuracy_score
 from sklearn.preprocessing import (
-    LabelEncoder,
-    MinMaxScaler,
     StandardScaler,
     minmax_scale,
     scale,
 )
-from tensorflow.keras import metrics, regularizers
-from tensorflow.keras.callbacks import EarlyStopping
-from tensorflow.keras.initializers import Constant
-from tensorflow.keras.models import load_model
+from keras import metrics, regularizers
+from keras.callbacks import EarlyStopping
+from keras.initializers import Constant
+from keras.models import load_model
+from utils.tools import _perc_fmt
+from utils.plot import plot_pie, save_plot
+import seaborn as sns
 
 Logger = logging.getLogger(__name__)
 
@@ -51,25 +50,120 @@ METRICS = [
 ]
 
 
+def match_peaks_to_exp(
+    ref_exp_inner_df: pd.DataFrame,
+    peak_results: pd.DataFrame,
+    n_peaks: int = 1,
+):
+    """Match peaks to experimental peaks and return True or False in "matched" column"""
+    # TODO: currently only supports one exp pcm RT per precursor id
+    peak_results = pd.merge(
+        left=peak_results,
+        right=ref_exp_inner_df[
+            [
+                "id",
+                "Calibrated retention time start",
+                "Calibrated retention time",
+                "Calibrated retention time finish",
+            ]
+        ],
+        on="id",
+        how="left",
+    )
+    peak_results["RT_apex_diff"] = abs(
+        peak_results["apex_time"] - peak_results["Calibrated retention time"]
+    )
+
+    Logger.info("Use RT range as reference for peak selection.")
+    peak_results["RT_start_diff"] = abs(
+        peak_results["start_time"] - peak_results["Calibrated retention time start"]
+    )
+    peak_results["RT_end_diff"] = abs(
+        peak_results["end_time"] - peak_results["Calibrated retention time finish"]
+    )
+    peak_results["RT_diff_sum"] = (
+        peak_results["RT_start_diff"] + peak_results["RT_end_diff"]
+    )
+
+    # drop rows where "RT_diff_sum" is NaN
+    peak_results.dropna(subset=["RT_diff_sum"], inplace=True)
+
+    peak_results.loc[
+        peak_results.groupby("id")["RT_diff_sum"]
+        .nsmallest(n_peaks)
+        .index.get_level_values(1),
+        "matched",
+    ] = True
+    peak_results["matched"].fillna(False, inplace=True)
+
+    return peak_results
+
+
+def peak_results_report(peak_results: pd.DataFrame, save_dir: str | None = None):
+    """Generate a report for the peak results dataframe"""
+    # Calculate width distribution for matched and unmatched peaks
+    matched_widths = peak_results[peak_results["matched"]]["peak_width"]
+    unmatched_widths = peak_results[~peak_results["matched"]]["peak_width"]
+
+    plot_pie(
+        sizes=matched_widths.value_counts().values,
+        labels=matched_widths.value_counts().index.values,
+        title="Peak Width Distribution for Matched Peaks",
+        save_dir=save_dir,
+        fig_spec_name="MatchedPeakWidth",
+        accumulative_threshold=0.95,
+    )
+
+    # Generate pie chart for unmatched peaks
+    plot_pie(
+        sizes=unmatched_widths.value_counts().values,
+        labels=unmatched_widths.value_counts().index.values,
+        title="Peak Width Distribution for Unmatched Peaks",
+        save_dir=save_dir,
+        fig_spec_name="UnmatchedPeakWidth",
+        accumulative_threshold=0.95,
+    )
+
+    # Get the top 10 width value counts
+    top_widths = peak_results["peak_width"].value_counts().nlargest(10)
+
+    # Plot the count plot for the top 10 widths
+    sns.countplot(
+        data=peak_results[peak_results["peak_width"].isin(top_widths.index)],
+        x="peak_width",
+        hue="matched",
+    )
+
+    # Set the title and labels
+    plt.title("Peak Width Distribution")
+    plt.xlabel("Peak Width")
+    plt.ylabel("Count")
+
+    save_plot(save_dir, fig_type_name="Count", fig_spec_name="PeakWidth")
+
+
 def transform_activation(
     activation_df: pd.DataFrame,
     log_intensity: bool = False,
     standardize: Literal["std", "minmax"] | None = "std",
 ):
+    """Transform the activation dataframe to a standardized (and/or log) dataframe"""
+    activation_values = activation_df.values
     if log_intensity:
-        activation_df = np.log(activation_df + 1)
+        activation_values = np.log(activation_values + 1)
     match standardize:
         case "std":
-            activation_df_std = scale(activation_df, axis=1)
+            activation_values_std = scale(activation_values, axis=1)
         case "minmax":
-            activation_df_std = minmax_scale(
-                activation_df, axis=1, feature_range=(0, 1)
+            activation_values_std = minmax_scale(
+                activation_values, axis=1, feature_range=(0, 1)
             )
         case None:
-            scaler = None
-            activation_df_std = activation_df
+            activation_values_std = activation_values
     activation_df_std = pd.DataFrame(
-        activation_df_std, index=activation_df.index, columns=activation_df.columns
+        data=np.array(activation_values_std),
+        index=activation_df.index,
+        columns=activation_df.columns,
     )
     return activation_df_std
 
@@ -82,18 +176,17 @@ def prepare_peak_input(
     margin: int = 3,
     method: Literal["mask", "clip"] = "mask",
 ):
+    """Prepare the peak input as arrays for peak classification"""
     activation_df_std = transform_activation(activation_df, log_intensity, standardize)
 
-    def get_roi(peak_results_row: pd.Series, method: Literal["mask", "clip"] = "mask"):
+    def _get_roi(peak_results_row: pd.Series, method: Literal["mask", "clip"] = "mask"):
+        """Get the region of interest from the activation dataframe"""
         start_index = peak_results_row["start_scan"] - margin
         end_index = peak_results_row["end_scan"] + margin
         match method:
-            case "mask":
-                # Get the original row
+            case "mask":  # get roi by masking out the rest
                 original_row = activation_df_std.loc[peak_results_row["id"]].values
-                # Create a new row with all values set to 0
                 new_row = np.zeros_like(original_row)
-                # Replace the selected part in the new row with the original values
                 new_row[start_index : end_index + 1] = original_row[
                     start_index : end_index + 1
                 ]
@@ -103,32 +196,14 @@ def prepare_peak_input(
                     ]
                     + 1
                 ]
-            case "clip":
+            case "clip":  # get roi by clipping the rest
                 return activation_df_std.loc[
                     peak_results_row["id"],
                     start_index : end_index + 1,
                 ].values
 
-    peaks = peak_results.apply(get_roi, axis=1, method=method)
+    peaks = peak_results.apply(_get_roi, axis=1, method=method)
     return peaks.values
-
-
-def match_time_to_scan(
-    df: pd.DataFrame, time_cols: List[str], MS1Scans_NoArray: pd.DataFrame
-):
-    # Build a KDTree from the starttime values
-    tree = cKDTree(MS1Scans_NoArray[["starttime"]])
-
-    for time_col in time_cols:
-        time_scan_col = time_col + "_scan"
-
-        # Query the tree for the nearest neighbor to each time value
-        _, indices = tree.query(df[[time_col]].values)
-
-        # Use the indices to get the corresponding scan numbers
-        df[time_scan_col] = MS1Scans_NoArray.iloc[indices]["scan_number"].values
-
-    return df
 
 
 def prepare_seq_input_label(
@@ -142,7 +217,10 @@ def prepare_seq_input_label(
 
     def mark_peak(ref_dict_exp_inner_df_row):
         precursor_id = ref_dict_exp_inner_df_row.id
-        sbs_window_left_scan, sbs_window_right_scan = ref_dict_exp_inner_df_row.loc[
+        (
+            sbs_window_left_scan,
+            sbs_window_right_scan,
+        ) = ref_dict_exp_inner_df_row.loc[
             ["sbs_window_left_scan", "sbs_window_right_scan"]
         ].astype(int)
         label = np.zeros_like(activation_df_std.iloc[0].values)
@@ -168,8 +246,6 @@ class PeakSegModel:
         self,
         seq_input: np.ndarray,
         seq_label: np.ndarray,
-        # MQ_dict_exp_inner: pd.DataFrame,
-        # MS1Scans_NoArray: pd.DataFrame,
     ):
         self.seq_input = seq_input
         self.seq_label = seq_label
@@ -200,7 +276,6 @@ class PeakSegModel:
                     result = np.full((maxlen,), value)
                     pad_length = maxlen - len(peak)
                     before = pad_length // 2
-                    # after = pad_length - before
                     result[before : before + len(peak)] = peak
                     return result
 
@@ -326,7 +401,8 @@ class PeakClsModel:
 
             self.train_indices = np.where(self.precursor_id.isin(self.train_ids))[0]
             Logger.debug(
-                "Train indices top 5 max: %s", (-self.train_indices).argsort()[:5]
+                "Train indices top 5 max: %s",
+                (-self.train_indices).argsort()[:5],
             )
             self.test_indices = np.where(self.precursor_id.isin(self.test_ids))[0]
         else:
@@ -360,8 +436,8 @@ class PeakClsModel:
         total = neg + pos
         if self.initial_bias == "auto":
             print(
-                "Examples:\n    Total: {}\n    Positive: {} ({:.2f}% of total)\n"
-                .format(total, pos, 100 * pos / total)
+                "Examples:\n    Total: {}\n    Positive: {} ({:.2f}% of"
+                " total)\n".format(total, pos, 100 * pos / total)
             )
             self.initial_bias = np.log([pos / neg])
             Logger.debug("Automatically calculate output bias: %s", self.initial_bias)
@@ -396,8 +472,8 @@ class PeakClsModel:
                 res_pos_labels = pos_labels[choices]
 
                 Logger.debug(
-                    "Oversampling positive features, resampled positive features"
-                    " shape: %s",
+                    "Oversampling positive features, resampled positive"
+                    " features shape: %s",
                     res_pos_features.shape,
                 )
 
@@ -413,8 +489,8 @@ class PeakClsModel:
                 res_neg_labels = neg_labels[choices]
 
                 Logger.debug(
-                    "Undersampling negative features, resampled negative features"
-                    " shape: %s",
+                    "Undersampling negative features, resampled negative"
+                    " features shape: %s",
                     res_neg_features.shape,
                 )
 
@@ -543,7 +619,7 @@ class PeakClsModel:
                     metrics=METRICS,
                 )
                 self.class_model = model
-            case other:
+            case _:
                 model_path = pathlib.Path(model)
                 Logger.info("Using existing model: %s", model_path.resolve())
                 self.class_model = load_model(model)

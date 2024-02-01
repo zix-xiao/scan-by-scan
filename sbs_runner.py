@@ -49,7 +49,7 @@ def _define_rt_search_range(
         )
         rt_ref_act_peak = "Retention time new"
     maxquant_result_dict["RT_search_center"] = maxquant_result_dict[rt_ref_act_peak]
-    return maxquant_result_dict, rt_ref_act_peak
+    return maxquant_result_dict
 
 
 def _merge_activation_results(
@@ -107,7 +107,7 @@ def opt_scan_by_scan(config_path: str):
     logging.info("Script execution time: %dm %ds", int(minutes), int(seconds))
 
     # deifne RT search range
-    maxquant_result_ref, rt_ref_act_peak = _define_rt_search_range(
+    maxquant_result_ref = _define_rt_search_range(
         maxquant_result_ref, conf.rt_tol, conf.rt_ref
     )
     maxquant_result_ref.to_pickle(
@@ -220,12 +220,11 @@ def opt_scan_by_scan(config_path: str):
     try:
         sum_peak = pd.read_csv(os.path.join(conf.result_dir, "sum_peak.csv"))
     except FileNotFoundError:
-        sum_peak, peak_results = post_processing.calculate_sum_activation_array(
-            Maxquant_result=maxquant_result_ref,
-            MS1ScansNoArray=ms1cans_no_array,
+        sum_peak, peak_results = post_processing.select_peak_from_activation(
+            maxquant_result_ref=maxquant_result_ref,
+            ms1scans_no_array=ms1cans_no_array,
             activation=refit_activation_minima,
-            ref_RT_apex=rt_ref_act_peak,
-            return_peak_result=True,
+            return_peak_result=True,  # default find peaks setting, minimal peak_width = 2
         )
         sum_peak.to_csv(os.path.join(conf.result_dir, "sum_peak.csv"), index=False)
         peak_results.to_csv(
@@ -250,7 +249,9 @@ def opt_scan_by_scan(config_path: str):
         sum_peak=sum_peak,
     )
 
-    sbs_result.compare_with_maxquant_exp_int(filter_by_rt_overlap=None)
+    sbs_result.compare_with_maxquant_exp_int(
+        filter_by_rt_overlap=None, save_dir=conf.report_dir
+    )
 
     # Correlation
     for sum_col in sbs_result.sum_cols:
@@ -263,6 +264,12 @@ def opt_scan_by_scan(config_path: str):
 
     # evaluate target and decoy
     sbs_result.eval_target_decoy(save_dir=conf.report_dir)
+
+    # selected alpha
+    if conf.opt_algo == "lasso_cd":
+        result_analysis.plot_alphas_across_scan(
+            scan_record=scan_record, x="Time", save_dir=conf.report_dir
+        )
 
     # Report
     scan_record = result_analysis.generate_result_report(
