@@ -1,20 +1,21 @@
+import logging
+from typing import Union
 import numpy as np
 import pandas as pd
 
 import IsoSpecPy as iso
 import matplotlib.pyplot as plt
-
-from typing import Union, Literal
-from utils.plot import plot_comparison
-from utils.config import _AlignMethods
-from utils.tools import ExtractPeak
-import logging
 from sklearn.metrics import jaccard_score
+import networkx as nx
+
+from utils.plot import plot_comparison
+from utils.tools import ExtractPeak
+
 
 Logger = logging.getLogger(__name__)
 
 
-def CalcModpeptIsopattern(
+def calculate_modpept_isopattern(
     modpept: str, charge: int, ab_thres: float = 0.005, mod_CAM: bool = True
 ):
     """takes a peptide sequence with modification and charge,
@@ -49,523 +50,131 @@ def CalcModpeptIsopattern(
     atom_composition["O"] += 1 * n_C + 1 + n_acetylN + 1 * n_Mox
 
     # Isotope calculation
-    formula = "".join(
-        ["%s%s" % (key, value) for key, value in atom_composition.items()]
-    )
+    formula = "".join([f"{key}{value}" for key, value in atom_composition.items()])
     iso_distr = iso.IsoThreshold(formula=formula, threshold=ab_thres, absolute=True)
     iso_distr.sort_by_mass()
-    mz_sortByMass = iso_distr.np_masses() / charge
-    probs_sortByMass = iso_distr.np_probs()
+    mz_sort_by_mass = iso_distr.np_masses() / charge
+    probs_sort_by_mass = iso_distr.np_probs()
 
-    return mz_sortByMass, probs_sortByMass
-
-
-# TODO: main method is moved to Dict class, consider archieve it
-def AlignMZ(
-    anchor: pd.DataFrame,
-    precursorRow: pd.Series,
-    col_to_align=["mzarray_obs", "mzarray_calc"],
-    mz_tol=1e-4,
-    primaryAbundanceThres: float = 0.05,
-    AbundanceMissingThres: float = 0.4,
-    method: _AlignMethods = "2stepNN",  # case peakRange is moved to Dict class
-    verbose=False,
-):
-    sample = pd.DataFrame(
-        {
-            "mzarray_calc": precursorRow["IsoMZ"],
-            "abundance": precursorRow["IsoAbundance"],
-        }
-    )
-    alignment = None
-    mzDelta_mean = np.nan
-    mzDelta_std = np.nan
-    match method:
-        case "2stepNN":
-            primaryIsotope = sample.loc[sample["abundance"] >= primaryAbundanceThres]
-            primaryAlignment = pd.merge_asof(
-                left=anchor.sort_values(col_to_align[0]),
-                right=primaryIsotope.sort_values(col_to_align[1]),
-                left_on=col_to_align[0],
-                right_on=col_to_align[1],
-                tolerance=mz_tol,
-                direction="nearest",
-            ).dropna(
-                axis=0
-            )  # type: ignore
-            if primaryAlignment.shape[0] > 0:
-                primaryAlignment["alignmentRun"] = "primary"
-                anchor = anchor[
-                    ~anchor["mzarray_obs"].isin(primaryAlignment["mzarray_obs"])
-                ]
-                secondaryIsotope = sample.loc[
-                    sample["abundance"] < primaryAbundanceThres
-                ]
-                secondaryAlignment = pd.merge_asof(
-                    left=anchor.sort_values(col_to_align[0]),
-                    right=secondaryIsotope.sort_values(col_to_align[1]),
-                    left_on=col_to_align[0],
-                    right_on=col_to_align[1],
-                    tolerance=mz_tol,
-                    direction="nearest",
-                ).dropna(
-                    axis=0
-                )  # type: ignore
-                secondaryAlignment["alignmentRun"] = "secondary"
-                alignment = pd.concat([primaryAlignment, secondaryAlignment], axis=0)
-                alignment["mzDelta"] = (
-                    alignment["mzarray_obs"] - alignment["mzarray_calc"]
-                )
-                mzDelta_mean = alignment["mzDelta"].mean()
-                mzDelta_std = alignment["mzDelta"].std()
-
-    if alignment is not None:
-        IsotopeNotObs = sample[~sample["mzarray_calc"].isin(alignment["mzarray_calc"])]
-        AbundanceNotObs = IsotopeNotObs["abundance"].sum()
-        n_matchedIso = alignment.shape[0]
-
-    else:
-        IsotopeNotObs = sample
-        AbundanceNotObs = 1
-        n_matchedIso = 0
-    IsKept = AbundanceNotObs <= AbundanceMissingThres
-    if verbose:
-        return (
-            n_matchedIso,
-            AbundanceNotObs,
-            IsKept,
-            mzDelta_mean,
-            mzDelta_std,
-            alignment,
-            IsotopeNotObs,
-        )
-    else:
-        return (
-            n_matchedIso,
-            AbundanceNotObs,
-            IsKept,
-            mzDelta_mean,
-            mzDelta_std,
-            None,
-            None,
-        )
+    return mz_sort_by_mass, probs_sort_by_mass
 
 
-def _get_RT_edge(
-    precursorRow: pd.Series,
-    MS1Scans: pd.DataFrame,
-    ScanIdx: int,
-    direction: Literal[1, -1],
-    ScanIdx_left: int,
-    ScanIdx_right: int,
-    IsInLastScan: Union[None, bool] = True,
-    AbundanceMissingThres: float = 0.4,
-):
+def _connect_collinear_candidate_pairs(collinear_pairs: pd.Series):
     """
-    Given a seeding scan index 'ScanIdx' that contains the target precursor,
-    find the closest edge.
+    Given a series of collinear pairs, connect them into a graph and return the graph object
 
-    :precursorRow:
-    :MS1Scans:
-    :ScanIdx:
-    :direction: the direction for which search space is extended,
-                1 stand for right range and -1 stand for left range
-    :ScanIdx_left: the left edge of search limit
-    :ScanIdx_right: the right edge of search limit
-    :IsInLastScan: whether the precursor is in the previous scan (by time)
-    :AbundanceMissingThres:
-
+    :collinear_pairs: pd.Series, index being collinear pairs and values being correlation coefficient
     """
+    G = nx.from_edgelist(collinear_pairs.index)
+    # Find connected components
+    connected_components_df = nx.to_pandas_adjacency(G)
+    # Create an empty pandas series to store the connected precursors
+    connected_precursors = pd.Series(index=connected_components_df.index, dtype=object)
 
-    # Calculate IsInThisScan and IsInLastScan
-    MS1Intensity = pd.DataFrame(
-        {
-            "mzarray_obs": MS1Scans.iloc[ScanIdx, :]["mzarray"],
-            "intensity": MS1Scans.iloc[ScanIdx, :]["intarray"],
-        }
-    )
-    if IsInLastScan is None:
-        _, _, IsInLastScan, _, _, _, _ = AlignMZ(
-            anchor=MS1Intensity,
-            precursorRow=precursorRow,
-            verbose=False,
-            method="peakRange",
-            AbundanceMissingThres=AbundanceMissingThres,
-        )
-    if IsInLastScan:
-        Logger.debug(
-            "Is in scan %s and search for %s scan %s",
-            ScanIdx,
-            direction,
-            ScanIdx + direction,
-        )
-        ScanIdx += direction
-        MS1Intensity = pd.DataFrame(
-            {
-                "mzarray_obs": MS1Scans.iloc[ScanIdx, :]["mzarray"],
-                "intensity": MS1Scans.iloc[ScanIdx, :]["intarray"],
-            }
-        )
-        _, _, IsInThisScan, _, _, _, _ = AlignMZ(
-            anchor=MS1Intensity,
-            precursorRow=precursorRow,
-            verbose=False,
-            method="peakRange",
-            AbundanceMissingThres=AbundanceMissingThres,
-        )
-    else:
-        if ScanIdx <= ScanIdx_right and ScanIdx >= ScanIdx_left:
-            Logger.debug(
-                "Is not in scan %s and search for %s scan %s",
-                ScanIdx,
-                -direction,
-                ScanIdx - direction,
-            )
-            ScanIdx -= direction
-            MS1Intensity = pd.DataFrame(
-                {
-                    "mzarray_obs": MS1Scans.iloc[ScanIdx, :]["mzarray"],
-                    "intensity": MS1Scans.iloc[ScanIdx, :]["intarray"],
-                }
-            )
-            _, _, IsInThisScan, _, _, _, _ = AlignMZ(
-                anchor=MS1Intensity,
-                precursorRow=precursorRow,
-                verbose=False,
-                method="peakRange",
-                AbundanceMissingThres=AbundanceMissingThres,
-            )
-        else:
-            IsInThisScan = 3
-
-    # Recursive behavior
-    match (int(IsInLastScan) + int(IsInThisScan)):
-        case 1:
-            Logger.info("Found scan index with direction %s: %s", direction, ScanIdx)
-            return ScanIdx
-        case 3 | 4:
-            Logger.info("Scan index out of predefined range, stop searching")
-            return None
-        case 0 | 2:  # consecutive N or Y
-            return _get_RT_edge(
-                precursorRow=precursorRow,
-                MS1Scans=MS1Scans,
-                ScanIdx_left=ScanIdx_left,
-                ScanIdx_right=ScanIdx_right,
-                direction=direction,
-                ScanIdx=ScanIdx,
-                IsInLastScan=IsInThisScan,
-            )
-
-
-def _search_BiDir_scans(
-    precursorRow: pd.Series,
-    MS1Scans: pd.DataFrame,
-    ScanIdx: int,
-    ScanIdx_left: int,
-    ScanIdx_right: int,
-    step: int,
-    AbundanceMissingThres: float = 0.4,
-):
-    """
-    Given a seeding scan (that does not contain target precursor),
-    Search for left and right scan until target is found or reach search limit.
-
-    :precursorRow:
-    :MS1Scans:
-    :ScanIdx:
-    :ScanIdx_left: the left edge of search limit
-    :ScanIdx_right: the right edge of search limit
-    :step: the distance (+/-) between candidate scans and start scan
-    :AbundanceMissingThres:
-    """
-    if (
-        ScanIdx - step >= ScanIdx_left
-    ):  # ensure search limit, only use left because of symmetricality
-        MS1Intensity_next_left = pd.DataFrame(
-            {
-                "mzarray_obs": MS1Scans.iloc[ScanIdx - step, :]["mzarray"],
-                "intensity": MS1Scans.iloc[ScanIdx - step, :]["intarray"],
-            }
-        )
-        _, _, IsInNextLeft, _, _, _, _ = AlignMZ(
-            anchor=MS1Intensity_next_left,
-            precursorRow=precursorRow,
-            verbose=False,
-            method="peakRange",
-            AbundanceMissingThres=AbundanceMissingThres,
-        )
-        MS1Intensity_next_right = pd.DataFrame(
-            {
-                "mzarray_obs": MS1Scans.iloc[ScanIdx + step, :]["mzarray"],
-                "intensity": MS1Scans.iloc[ScanIdx + step, :]["intarray"],
-            }
-        )
-        _, _, IsInNextRight, _, _, _, _ = AlignMZ(
-            anchor=MS1Intensity_next_right,
-            precursorRow=precursorRow,
-            verbose=False,
-            method="peakRange",
-            AbundanceMissingThres=AbundanceMissingThres,
-        )
-
-        match (IsInNextLeft, IsInNextRight):
-            case (0, 0):
-                Logger.debug(
-                    "Precursor %s not observed in scan %s and %s, search with increased"
-                    " step",
-                    precursorRow["id"],
-                    ScanIdx - step,
-                    ScanIdx + step,
-                )
-                step += 1
-                return _search_BiDir_scans(
-                    precursorRow,
-                    MS1Scans,
-                    ScanIdx,
-                    ScanIdx_left=ScanIdx_left,
-                    ScanIdx_right=ScanIdx_right,
-                    step=step,
-                    AbundanceMissingThres=AbundanceMissingThres,
-                )
-            case (0, 1):
-                Logger.debug(
-                    "Precursor %s not observed in scan %s but in %s, search for right"
-                    " edge",
-                    precursorRow["id"],
-                    ScanIdx - step,
-                    ScanIdx + step,
-                )
-                Left = ScanIdx + step
-                Right = _get_RT_edge(
-                    precursorRow=precursorRow,
-                    MS1Scans=MS1Scans,
-                    ScanIdx=ScanIdx + step,
-                    direction=1,
-                    ScanIdx_left=ScanIdx + step,
-                    ScanIdx_right=ScanIdx_right,
-                    IsInLastScan=True,
-                    AbundanceMissingThres=AbundanceMissingThres,
-                )
-                return Left, Right
-            case (1, 0):
-                Logger.debug(
-                    "Precursor %s observed in scan %s but not in %s, search for left"
-                    " edge",
-                    precursorRow["id"],
-                    ScanIdx - step,
-                    ScanIdx + step,
-                )
-                Right = ScanIdx - step
-                Left = _get_RT_edge(
-                    precursorRow=precursorRow,
-                    MS1Scans=MS1Scans,
-                    ScanIdx=ScanIdx - step,
-                    direction=-1,
-                    ScanIdx_left=ScanIdx_left,
-                    ScanIdx_right=ScanIdx - step,
-                    IsInLastScan=True,
-                    AbundanceMissingThres=AbundanceMissingThres,
-                )
-                return Left, Right
-            case (1, 1):
-                Logger.warning(
-                    "Precursor %s observed in equal distance scan %s and %s,           "
-                    "                      incorporate empty scans in the middle",
-                    precursorRow["id"],
-                    ScanIdx - step,
-                    ScanIdx + step,
-                )
-                Left = _get_RT_edge(
-                    precursorRow=precursorRow,
-                    MS1Scans=MS1Scans,
-                    ScanIdx=ScanIdx - step,
-                    direction=-1,
-                    ScanIdx_left=ScanIdx_left,
-                    ScanIdx_right=ScanIdx - step,
-                    IsInLastScan=True,
-                    AbundanceMissingThres=AbundanceMissingThres,
-                )
-                Right = _get_RT_edge(
-                    precursorRow=precursorRow,
-                    MS1Scans=MS1Scans,
-                    ScanIdx=ScanIdx + step,
-                    direction=1,
-                    ScanIdx_left=ScanIdx - step,
-                    ScanIdx_right=ScanIdx_right,
-                    IsInLastScan=True,
-                    AbundanceMissingThres=AbundanceMissingThres,
-                )
-                return Left, Right
-    else:
-        Logger.info("Scan index out of predefined range, stop searching")
-        return None, None
-
-
-def locate_RT_range(
-    precursorRow: pd.Series,
-    MS1Scans: pd.DataFrame,
-    ScanIdx: int,
-    search_range: int = 100,
-    step: int = 1,
-    AbundanceMissingThres: float = 0.4,
-):
-    """
-    Given a seeding scan index 'ScanIdx', find the start (side = 1) or end (side = -1) scan.
-
-    ScanIdx has an impact on the final result, it only finds the nearest
-    fulfilling condition.
-    [IMPORTANT] Assumption is that ScanIdx (starting scan)
-    needs to be closed enough to truth, else it will stop at the closet
-    occurrence.
-    Use two case scenario: whether the starting seed scan contains
-    the target or not
-
-    :precursorRow:
-    :MS1Scans:
-    :ScanIdx:
-    :search_range: the number of scans to be searched till stop
-    :AbundanceMissingThres:
-    """
-    ScanIdx_left = ScanIdx - search_range
-    ScanIdx_right = ScanIdx + search_range
-    Logger.debug(
-        "Start scan = %s, Scan edge = (%s, %s)", ScanIdx, ScanIdx_left, ScanIdx_right
-    )
-    MS1Intensity = pd.DataFrame(
-        {
-            "mzarray_obs": MS1Scans.iloc[ScanIdx, :]["mzarray"],
-            "intensity": MS1Scans.iloc[ScanIdx, :]["intarray"],
-        }
-    )
-
-    _, _, IsInThisScan, _, _, _, _ = AlignMZ(
-        anchor=MS1Intensity,
-        precursorRow=precursorRow,
-        verbose=False,
-        method="peakRange",
-        AbundanceMissingThres=AbundanceMissingThres,
-    )
-    if IsInThisScan:
-        Logger.debug(
-            "Precursor %s observed in scan %s, search for left and right edge",
-            precursorRow["id"],
-            ScanIdx,
-        )
-        Left = _get_RT_edge(
-            precursorRow,
-            MS1Scans,
-            ScanIdx=ScanIdx - 1,
-            direction=-1,
-            ScanIdx_right=ScanIdx_right,
-            ScanIdx_left=ScanIdx_left,
-            IsInLastScan=True,
-            AbundanceMissingThres=AbundanceMissingThres,
-        )
-        Right = _get_RT_edge(
-            precursorRow,
-            MS1Scans,
-            ScanIdx=ScanIdx + 1,
-            direction=1,
-            ScanIdx_right=ScanIdx_right,
-            ScanIdx_left=ScanIdx_left,
-            IsInLastScan=True,
-            AbundanceMissingThres=AbundanceMissingThres,
-        )
-        return Left, Right
-
-    else:
-        Logger.debug(
-            "Precursor %s is not observed in seeding Scan %s, start searching scan %s"
-            " and %s.",
-            precursorRow["id"],
-            ScanIdx,
-            ScanIdx - step,
-            ScanIdx + step,
-        )
-        return _search_BiDir_scans(
-            precursorRow=precursorRow,
-            MS1Scans=MS1Scans,
-            ScanIdx=ScanIdx,
-            ScanIdx_left=ScanIdx_left,
-            ScanIdx_right=ScanIdx_right,
-            step=step,
-            AbundanceMissingThres=AbundanceMissingThres,
-        )
+    # Iterate over each precursor
+    for precursor in connected_components_df.index:
+        # Get the connected precursors for the current precursor
+        connected = connected_components_df.columns[
+            connected_components_df.loc[precursor] == 1
+        ].tolist()
+        # Store the connected precursors in the series
+        connected_precursors[precursor] = connected
+    connected_precursors.sort_index(inplace=True)
+    return connected_precursors
 
 
 class Dict:
     def __init__(
         self,
-        CandidateByRT: pd.DataFrame,
-        OneScan: Union[pd.DataFrame, pd.Series],
-        AbundanceMissingThres: float = 0.4,
+        candidate_by_rt: pd.DataFrame,
+        one_scan: Union[pd.DataFrame, pd.Series],
+        abundance_missing_thres: float = 0.4,
         rel_height: float = 0.75,
     ) -> None:
-        self.n_cand_by_RT = CandidateByRT.shape[0]
-        Logger.info("Number of candidates by RT %s", self.n_cand_by_RT)
+        self.n_candidate_by_rt = candidate_by_rt.shape[0]
+        self.candidate_by_rt = candidate_by_rt
+        Logger.info("Number of candidates by RT %s", self.n_candidate_by_rt)
 
-        self.AbundanceMissingThres = AbundanceMissingThres
-        self.MS1Intensity = pd.DataFrame(
-            {"mzarray_obs": OneScan["mzarray"], "intensity": OneScan["intarray"]}
+        self.abundance_missing_thres = abundance_missing_thres
+        ms1_int = pd.DataFrame(
+            {"mzarray_obs": one_scan["mzarray"], "intensity": one_scan["intarray"]}
         )
         self.peak_results = ExtractPeak(
-            np.array(self.MS1Intensity["mzarray_obs"]),
-            np.array(self.MS1Intensity["intensity"]),
+            np.array(ms1_int["mzarray_obs"]),
+            np.array(ms1_int["intensity"]),
             rel_height=rel_height,
         )
-        CandidateByRT_iso = (
-            CandidateByRT[["id", "IsoMZ", "IsoAbundance"]]
+
+        self.dict = None
+        self.filtered_candidate_idx = None
+        self.iso_abundance_by_id = None
+        self.obs_peak_int = None
+        self.match_candidate_with_peak()
+
+        self.corr_matrix = None
+        self.high_corr_sol = None
+        self.collinear_precursors = None
+        self.collinear_sets = None
+
+    def match_candidate_with_peak(self):
+        candidate_by_rt_iso = (
+            self.candidate_by_rt[["id", "IsoMZ", "IsoAbundance"]]
             .explode(["IsoMZ", "IsoAbundance"])
             .astype({"IsoMZ": "float64", "IsoAbundance": "float64"})
         )
 
-        CandidateByRT_iso = pd.merge_asof(
-            CandidateByRT_iso.sort_values("IsoMZ"),
+        candidate_by_rt_iso = pd.merge_asof(
+            candidate_by_rt_iso.sort_values("IsoMZ"),
             self.peak_results,
             left_on="IsoMZ",
             right_on="apex_mz",
             allow_exact_matches=True,
             direction="nearest",
         )
-        CandidateByRT_iso["matched"] = (
-            CandidateByRT_iso["IsoMZ"] >= CandidateByRT_iso["start_mz"]
-        ) & (CandidateByRT_iso["IsoMZ"] <= CandidateByRT_iso["end_mz"])
-        self.IsoAbundanceByID = (
-            CandidateByRT_iso.groupby(["id", "matched"])["IsoAbundance"]
+        candidate_by_rt_iso["matched"] = (
+            candidate_by_rt_iso["IsoMZ"] >= candidate_by_rt_iso["start_mz"]
+        ) & (candidate_by_rt_iso["IsoMZ"] <= candidate_by_rt_iso["end_mz"])
+        self.iso_abundance_by_id = (
+            candidate_by_rt_iso.groupby(["id", "matched"])["IsoAbundance"]
             .sum()
             .reset_index()
         )
-        CandidateByRT_isoMatched = CandidateByRT_iso[(CandidateByRT_iso["matched"])]
+        candidate_by_rt_iso_matched = candidate_by_rt_iso[
+            (candidate_by_rt_iso["matched"])
+        ]
         Logger.info(
             "Number of candidates after isotope match %s",
-            len(CandidateByRT_isoMatched["id"].unique()),
+            len(candidate_by_rt_iso_matched["id"].unique()),
         )
-        if len(CandidateByRT_isoMatched["id"].unique()) > 0:
-            CandidateByRT_isoFiltered = self.IsoAbundanceByID[
-                self.IsoAbundanceByID["matched"]
+
+        # filter candidates by isotope abundance
+        if len(candidate_by_rt_iso_matched["id"].unique()) > 0:
+            candidate_by_rt_iso_filtered = self.iso_abundance_by_id[
+                self.iso_abundance_by_id["matched"]
                 & (
-                    self.IsoAbundanceByID["IsoAbundance"]
-                    >= (1 - self.AbundanceMissingThres)
+                    self.iso_abundance_by_id["IsoAbundance"]
+                    >= (1 - self.abundance_missing_thres)
                 )
             ]
-            self.filteredCandidateIdx = (
-                CandidateByRT_isoFiltered["id"].unique().tolist()
+            self.filtered_candidate_idx = (
+                candidate_by_rt_iso_filtered["id"].unique().tolist()
             )
             Logger.info(
                 "Number of candidates after isotope abundance filter %s",
-                len(self.filteredCandidateIdx),
+                len(self.filtered_candidate_idx),
             )
-            if len(self.filteredCandidateIdx) > 0:
-                CandidateByRT_isoFiltered_sumAbundance = (
-                    CandidateByRT_isoMatched[
-                        CandidateByRT_isoMatched["id"].isin(self.filteredCandidateIdx)
+            if len(self.filtered_candidate_idx) > 0:
+                candidate_by_rt_iso_filtered_sum_abundance = (
+                    candidate_by_rt_iso_matched[
+                        candidate_by_rt_iso_matched["id"].isin(
+                            self.filtered_candidate_idx
+                        )
                     ]
                     .groupby(["id", "apex_mz"])["IsoAbundance"]
                     .sum()
                     .reset_index()
                 )
-                candid_dict = CandidateByRT_isoFiltered_sumAbundance.pivot(
+                candid_dict = candidate_by_rt_iso_filtered_sum_abundance.pivot(
                     index="apex_mz", columns="id", values="IsoAbundance"
                 )
                 self.dict = pd.merge(
@@ -584,7 +193,7 @@ class Dict:
                     len(self.dict.columns.values),
                 )
 
-                self.obs_int = pd.DataFrame(
+                self.obs_peak_int = pd.DataFrame(
                     {
                         "mzarray_obs": np.append(
                             self.peak_results["apex_mz"].values,
@@ -596,43 +205,23 @@ class Dict:
                         ),
                     }
                 )
-            else:
-                self.dict = None
-                self.filteredCandidateIdx = None
-        else:
-            self.dict = None
-            self.filteredCandidateIdx = None
-
-    def plot_observe_iso_abundance(self):
-        self.IsoAbundanceByID[self.IsoAbundanceByID["matched"]]["IsoAbundance"].hist(
-            bins=100
-        )
-        plt.title("Distribution of Observed Isotope Abundance")
-        ymin, ymax = plt.ylim()
-        plt.vlines(
-            x=1 - self.AbundanceMissingThres,
-            ymin=ymin,
-            ymax=ymax,
-            label="Abundance Thres",
-            color="r",
-        )
 
     def get_feature_corr(
         self,
         corr_thres: float = 0.9,
         calc_jaccard_sim: bool = True,
-        plot_hmap: bool = True,
-        plot_hist: bool = True,
+        plot_hmap: bool = False,
+        plot_collinear_hist: bool = False,
     ):
-        corr_matrix = self.dict.corr()
+        self.corr_matrix = self.dict.corr()
         if plot_hmap:
-            corr_matrix.style.background_gradient(cmap="coolwarm")
-            plt.matshow(corr_matrix)
+            self.corr_matrix.style.background_gradient(cmap="coolwarm")
+            plt.matshow(self.corr_matrix)
             plt.show()
-        self.sol = corr_matrix.where(
-            np.triu(np.ones(corr_matrix.shape), k=1).astype(bool)
+        sol = self.corr_matrix.where(
+            np.triu(np.ones(self.corr_matrix.shape), k=1).astype(bool)
         ).stack()
-        self.high_corr_sol = self.sol[self.sol >= corr_thres]  # type: ignore
+        self.high_corr_sol = sol[sol >= corr_thres]  # type: ignore
         if calc_jaccard_sim:
             jaccard_sim = []
             for pairs, _ in self.high_corr_sol.items():
@@ -647,116 +236,51 @@ class Dict:
                 {"Pearson R": self.high_corr_sol, "Jaccard Similarity": jaccard_sim}
             )
 
-        if plot_hist:
-            self.sol.hist(log=True, bins=100)
+        # self.collinear_sets_list = _connect_collinear_candidate_pairs(
+        #     self.high_corr_sol
+        # )
+        # Create a graph from the adjacency matrix
+        graph = nx.from_edgelist(self.high_corr_sol.index)
+
+        # Get the connected nodes
+        self.collinear_sets = list(nx.connected_components(graph))
+        self.collinear_precursors = _connect_collinear_candidate_pairs(
+            self.high_corr_sol
+        )
+
+        if plot_collinear_hist:
+            self.high_corr_sol.plot.hist()
             ymin, ymax = plt.ylim()
             plt.vlines(x=0.95, ymin=ymin, ymax=ymax, linestyles="dashed")
             plt.vlines(x=0.9, ymin=ymin, ymax=ymax, linestyles="dashed")
             plt.vlines(
                 x=corr_thres, ymin=ymin, ymax=ymax, linestyles="dashed", color="r"
             )
+            plt.title("Distribution of Highly Correlation Coefficients")
 
         Logger.info(
-            "Number of candidate pairs with correlation larger than %s: %s",
+            "Number of collinear sets: %s with correlation threshold %s",
+            len(self.collinear_sets),
             corr_thres,
-            self.high_corr_sol.shape[0],
         )
-        tmp = self.high_corr_sol.reset_index()
-        self.HighCorrCand = np.union1d(tmp["level_0"].unique(), tmp["level_1"].unique())
         Logger.info(
-            "Number of candidated involved in high correlation: %s",
-            len(self.HighCorrCand),
+            "Number of candidates involved in high correlation: %s",
+            sum(len(s) for s in self.collinear_sets),
         )
 
-
-# TODO: peakRange method is moved to Dict class, consider archieve
-def ConstructDict(
-    CandidatePrecursorsByRT: pd.DataFrame,
-    OneScan: Union[pd.DataFrame, pd.Series],
-    method: _AlignMethods = "2stepNN",
-    AbundanceMissingThres: float = 0.4,
-    mz_tol: float = 0.01,
-    rel_height: float = 0.75,
-):
-    """
-    Use Candidate precursors that are preselected using RT information
-    to construct dictionary using isotope envelops
-
-    TODO: add arg explanation
-    """
-    MS1Intensity = pd.DataFrame(
-        {"mzarray_obs": OneScan["mzarray"], "intensity": OneScan["intarray"]}
-    )
-    peak_results = None
-    logging.debug("Prepare data.")
-
-    if method == "peakRange":
-        peak_results = ExtractPeak(
-            np.array(MS1Intensity["mzarray_obs"]),
-            np.array(MS1Intensity["intensity"]),
-            rel_height=rel_height,
+    def plot_observe_iso_abundance(self):
+        self.iso_abundance_by_id[self.iso_abundance_by_id["matched"]][
+            "IsoAbundance"
+        ].hist(bins=100)
+        plt.title("Distribution of Observed Isotope Abundance")
+        ymin, ymax = plt.ylim()
+        plt.vlines(
+            x=1 - self.abundance_missing_thres,
+            ymin=ymin,
+            ymax=ymax,
+            label="Abundance Thres",
+            color="r",
         )
-        merge_key = "apex_mz"
-        CandidateDict = peak_results[[merge_key]]
-        y_true = pd.DataFrame(
-            {
-                "mzarray_obs": peak_results["apex_mz"],
-                "intensity": peak_results["peak_intensity_sum"],
-            }
-        )
-        logging.debug("peak extraction")
-
-    elif method == "2stepNN":
-        merge_key = "mzarray_obs"
-        CandidateDict = MS1Intensity[[merge_key]]
-        y_true = MS1Intensity
-        peak_results = None
-
-    # MZ alignment with row operation
-    AlignmentResult = CandidatePrecursorsByRT.copy()
-    logging.info("number of row alignment %s", CandidatePrecursorsByRT.shape[0])
-    (
-        AlignmentResult.loc[:, "n_matchedIso"],
-        AlignmentResult.loc[:, "AbundanceNotObs"],
-        AlignmentResult.loc[:, "IsKept"],
-        AlignmentResult.loc[:, "mzDelta_mean"],
-        AlignmentResult.loc[:, "mzDelta_std"],
-        alignment,
-        IsotopeNotObs,
-    ) = zip(
-        *CandidatePrecursorsByRT.apply(
-            lambda row: AlignMZ(
-                MS1Intensity,
-                row,
-                method=method,
-                # peak_results=peak_results,
-                mz_tol=mz_tol,
-                verbose=True,
-                AbundanceMissingThres=AbundanceMissingThres,
-            ),
-            axis=1,
-        )
-    )
-    logging.debug("align mz row by row.")
-
-    # merge each filtered precursor into dictionary
-    filteredIdx = np.where(AlignmentResult["IsKept"])[0]
-    filteredPrecursorIdx = AlignmentResult[AlignmentResult["IsKept"]].index
-    for idx, precursor_idx in zip(filteredIdx, filteredPrecursorIdx):
-        right = alignment[idx].groupby([merge_key])["abundance"].sum()
-        CandidateDict = pd.merge(
-            CandidateDict, right, on=merge_key, how="outer"
-        ).rename(columns={"abundance": precursor_idx}, inplace=False)
-    logging.debug("merge dictionaries")
-    CandidateDict = CandidateDict.groupby([merge_key]).sum()
-    return (
-        CandidateDict.fillna(0),
-        AlignmentResult,
-        alignment,
-        IsotopeNotObs,
-        y_true,
-        peak_results,
-    )
 
 
 def compare_isotope_pattern(MQ_withIso: pd.DataFrame, seq_A_idx: int, seq_B_idx: int):

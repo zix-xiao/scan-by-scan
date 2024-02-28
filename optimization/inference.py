@@ -1,7 +1,7 @@
 import logging
 import os
 from multiprocessing import cpu_count
-from typing import Callable, List, Literal, Union
+from typing import Callable, List, Union
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -17,9 +17,9 @@ from sklearn.metrics import (
 )
 
 from optimization.dictionary import Dict
+from optimization.custom_models import CustomLinearModel, mean_square_root_error
 from utils.plot import plot_comparison, plot_isopattern_and_obs
 from utils.config import _algo, _alpha_criteria, _alpha_opt_metric, _loss, _pp_method
-from optimization.custom_models import CustomLinearModel, mean_square_root_error
 
 Logger = logging.getLogger(__name__)
 
@@ -152,8 +152,8 @@ class Quant:
                             metric=metric,
                             max_iter=max_iter,
                         )
-                    BestAlphaIdx = np.array(self.metric).argmin()
-                    self.best_alpha = self.alphas[BestAlphaIdx]
+                    BestAlphaIdx = int(np.array(self.metric).argmin())
+                    self.best_alpha = self.alphas[int(BestAlphaIdx)]
                     Logger.info(
                         "Minimal distance reached at alpha = %s", self.best_alpha
                     )
@@ -190,8 +190,8 @@ class Quant:
                             )
                             break
                     if BestAlphaIdx is None:
-                        BestAlphaIdx = np.array(self.metric).argmin()
-                        self.best_alpha = self.alphas[BestAlphaIdx]
+                        BestAlphaIdx = int(np.array(self.metric).argmin())
+                        self.best_alpha = self.alphas[int(BestAlphaIdx)]
                         Logger.warning(
                             "Convergence not reached! Using alpha = %s with minimal"
                             " distance as candidate!",
@@ -317,7 +317,7 @@ class Quant:
         log_intensity: bool = False,
     ):
         plot_isopattern_and_obs(
-            Maxquant_result=Maxquant_result,
+            maxquant_result=Maxquant_result,
             infer_intensity=pd.Series(data=self.infer[0], index=self.obs_mz),
             lower_plot="infer",
             precursor_id=precursor_id,
@@ -346,6 +346,7 @@ def process_one_scan(
     max_iter: int = 1000,
     return_interim_results: bool = False,
     return_precursor_scan_cos_dist: bool = False,
+    return_collinear_candidates: bool = False,
     plot_alpha_trace: bool = False,
     plot_obs_and_infer: bool = False,
 ):
@@ -367,19 +368,19 @@ def process_one_scan(
 
     if CandidatePrecursorsByRT.shape[0] > 0:
         ScanDict = Dict(
-            CandidateByRT=CandidatePrecursorsByRT,
-            OneScan=OneScan,
-            AbundanceMissingThres=AbundanceMissingThres,
+            candidate_by_rt=CandidatePrecursorsByRT,
+            one_scan=OneScan,
+            abundance_missing_thres=AbundanceMissingThres,
         )
         CandidateDict = ScanDict.dict
-        filteredPrecursorIdx = ScanDict.filteredCandidateIdx
+        filteredPrecursorIdx = ScanDict.filtered_candidate_idx
         if CandidateDict is not None:
-            y_true = ScanDict.obs_int
+            y_true = ScanDict.obs_peak_int
 
             ScanDict.get_feature_corr(
                 corr_thres=corr_thres,
                 calc_jaccard_sim=False,
-                plot_hist=False,
+                plot_collinear_hist=False,
                 plot_hmap=False,
             )
             num_corr_dict_candidate = ScanDict.high_corr_sol.shape[0]
@@ -410,6 +411,11 @@ def process_one_scan(
                 "precursor": filteredPrecursorIdx,
                 "activation": PrecursorQuant.act,
             }
+            collinear_candidates = {
+                "precursor": ScanDict.collinear_precursors.index.values,
+                "collinear_candidates": ScanDict.collinear_precursors.values,
+            }
+
             if return_precursor_scan_cos_dist:
                 cos_dist = PrecursorQuant.calc_precursor_reconstruct_cos_dist()
                 precursor_cos_dist = {
@@ -438,6 +444,7 @@ def process_one_scan(
         else:
             activation = None
             precursor_cos_dist = None
+            collinear_candidates = None
             scan_sum = (
                 scan_idx,
                 OneScan["starttime"],
@@ -458,6 +465,7 @@ def process_one_scan(
         CandidateDict = None
         activation = None
         precursor_cos_dist = None
+        collinear_candidates = None
         scan_sum = (
             scan_idx,
             OneScan["starttime"],
@@ -475,6 +483,7 @@ def process_one_scan(
         "activation": activation,
         "CandidateDict": CandidateDict,
         "scans_record": scan_sum,
+        "precursor_collinear_sets": collinear_candidates,
     }
     match (return_interim_results, return_precursor_scan_cos_dist):
         case (True, True):

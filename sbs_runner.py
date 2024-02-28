@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 import postprocessing.post_processing as post_processing
+from postprocessing.peak_selection import match_peaks_to_exp
 from utils.tools import load_mzml
 from utils.config import Config
 from optimization.inference import process_scans_parallel
@@ -58,6 +59,7 @@ def _merge_activation_results(
     """Merge the activation results."""
     activation = pd.DataFrame(index=ref_id, columns=range(n_ms1scans))
     precursor_scan_cos_dist = pd.DataFrame(index=ref_id, columns=range(n_ms1scans))
+    precursor_collinear_sets = pd.DataFrame(index=ref_id, columns=range(n_ms1scans))
     scan_record_list = []
     for scan_idx, result_dict_scan in processed_scan_dict.items():
         if result_dict_scan["activation"] is not None:
@@ -68,6 +70,10 @@ def _merge_activation_results(
             precursor_scan_cos_dist.loc[
                 result_dict_scan["precursor_cos_dist"]["precursor"], scan_idx
             ] = result_dict_scan["precursor_cos_dist"]["cos_dist"]
+        if result_dict_scan["precursor_collinear_sets"] is not None:
+            precursor_collinear_sets.loc[
+                result_dict_scan["precursor_collinear_sets"]["precursor"], scan_idx
+            ] = result_dict_scan["precursor_collinear_sets"]["collinear_candidates"]
         scan_record_list.append(result_dict_scan["scans_record"])
     scan_record = pd.DataFrame(
         scan_record_list,
@@ -82,7 +88,7 @@ def _merge_activation_results(
             "IntensityExplained",
         ],
     )
-    return activation, precursor_scan_cos_dist, scan_record
+    return activation, precursor_scan_cos_dist, scan_record, precursor_collinear_sets
 
 
 def opt_scan_by_scan(config_path: str):
@@ -144,9 +150,12 @@ def opt_scan_by_scan(config_path: str):
         )
 
         # merge results
-        activation, precursor_scan_cos_dist, scan_record = _merge_activation_results(
-            processed_scan_dict, ref_id, n_ms1scans
-        )
+        (
+            activation,
+            precursor_scan_cos_dist,
+            scan_record,
+            precursor_collinear_sets,
+        ) = _merge_activation_results(processed_scan_dict, ref_id, n_ms1scans)
 
         minutes, seconds = divmod(time.time() - start_time, 60)
         logging.info(
@@ -156,6 +165,9 @@ def opt_scan_by_scan(config_path: str):
         # save results
         activation = activation.fillna(0)
         np.save(conf.output_file + "_activationByScanFromLasso.npy", activation.values)
+        np.save(
+            conf.output_file + "_collinearPrecursors", precursor_collinear_sets.values
+        )
         if conf.peak_sel_cos_dist:
             precursor_scan_cos_dist = precursor_scan_cos_dist.fillna(0)
             np.save(
@@ -219,6 +231,7 @@ def opt_scan_by_scan(config_path: str):
     # Elution peak preservation
     try:
         sum_peak = pd.read_csv(os.path.join(conf.result_dir, "sum_peak.csv"))
+        peak_results = pd.read_csv(os.path.join(conf.result_dir, "peak_results.csv"))
     except FileNotFoundError:
         sum_peak, peak_results = post_processing.select_peak_from_activation(
             maxquant_result_ref=maxquant_result_ref,
@@ -250,7 +263,15 @@ def opt_scan_by_scan(config_path: str):
     )
 
     sbs_result.compare_with_maxquant_exp_int(
-        filter_by_rt_overlap=None, save_dir=conf.report_dir
+        filter_by_rt_overlap=None, handle_mul_exp_pcm="drop", save_dir=conf.report_dir
+    )
+    merged_df = sbs_result.ref_exp_df_inner
+
+    peak_results_matched = match_peaks_to_exp(
+        ref_exp_inner_df=merged_df, peak_results=peak_results
+    )
+    peak_results_matched.to_csv(
+        os.path.join(conf.result_dir, "peak_results_matched.csv")
     )
 
     # Correlation
