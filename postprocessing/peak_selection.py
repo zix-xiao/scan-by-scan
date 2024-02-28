@@ -1,37 +1,34 @@
 import logging
-import pathlib
-from typing import Literal, Union, List
+from typing import Literal, List
 
 import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
+import seaborn as sns
 import numpy as np
 import pandas as pd
+from numba import jit
 import tensorflow as tf
 from keras.layers import (
-    LSTM,
     Conv1D,
     Dense,
     Dropout,
     GlobalMaxPooling1D,
+    GlobalAveragePooling1D,
     Masking,
 )
+from keras import metrics, regularizers
 from keras.losses import BinaryCrossentropy
 from keras.models import Sequential
 from keras.optimizers import Adam
-from numba import jit
-
 from sklearn.metrics import accuracy_score
 from sklearn.preprocessing import (
-    StandardScaler,
     minmax_scale,
     scale,
 )
-from keras import metrics, regularizers
-from keras.callbacks import EarlyStopping
-from keras.initializers import Constant
-from keras.models import load_model
-from utils.tools import _perc_fmt
+import math
+from utils.tools import match_time_to_scan
 from utils.plot import plot_pie, save_plot
-import seaborn as sns
+
 
 Logger = logging.getLogger(__name__)
 
@@ -48,6 +45,9 @@ METRICS = [
     metrics.AUC(name="auc"),
     metrics.AUC(name="prc", curve="PR"),  # precision-recall curve
 ]
+
+########################################################################################
+# The following functions are used for annotating peak results
 
 
 def match_peaks_to_exp(
@@ -99,8 +99,47 @@ def match_peaks_to_exp(
     return peak_results
 
 
-def peak_results_report(peak_results: pd.DataFrame, save_dir: str | None = None):
-    """Generate a report for the peak results dataframe"""
+def report_peak_property_distr(
+    peak_results: pd.DataFrame, property_col: str, save_dir: str | None = None
+):
+    matched = peak_results[peak_results["matched"]][property_col]
+    unmatched = peak_results[~peak_results["matched"]][property_col]
+
+    plot_pie(
+        sizes=matched.value_counts().values,
+        labels=matched.value_counts().index.values,
+        title=f"{property_col} Distribution for Matched Peaks",
+        save_dir=save_dir,
+        fig_spec_name=f"Matched_{property_col}",
+        accumulative_threshold=0.95,
+    )
+
+    plot_pie(
+        sizes=unmatched.value_counts().values,
+        labels=unmatched.value_counts().index.values,
+        title=f"{property_col} Distribution for Unmatched Peaks",
+        save_dir=save_dir,
+        fig_spec_name=f"Unmatched_{property_col}",
+        accumulative_threshold=0.95,
+    )
+
+    top_values = peak_results[property_col].value_counts().nlargest(10)
+
+    sns.countplot(
+        data=peak_results[peak_results[property_col].isin(top_values.index)],
+        x=property_col,
+        hue="matched",
+    )
+
+    plt.title(f"{property_col} Distribution")
+    plt.xlabel(property_col)
+    plt.ylabel("Count")
+
+    save_plot(save_dir, fig_type_name="Count", fig_spec_name=f"{property_col}")
+
+
+def report_peak_width_distr(peak_results: pd.DataFrame, save_dir: str | None = None):
+    """Generate a report on peak  for the peak results dataframe"""
     # Calculate width distribution for matched and unmatched peaks
     matched_widths = peak_results[peak_results["matched"]]["peak_width"]
     unmatched_widths = peak_results[~peak_results["matched"]]["peak_width"]
@@ -142,6 +181,8 @@ def peak_results_report(peak_results: pd.DataFrame, save_dir: str | None = None)
     save_plot(save_dir, fig_type_name="Count", fig_spec_name="PeakWidth")
 
 
+########################################################################################
+# The following functions are used for preparing the input for peak classification
 def transform_activation(
     activation_df: pd.DataFrame,
     log_intensity: bool = False,
@@ -168,538 +209,430 @@ def transform_activation(
     return activation_df_std
 
 
-def prepare_peak_input(
-    peak_results: pd.DataFrame,
+def prepare_seq_and_label(
     activation_df: pd.DataFrame,
     log_intensity: bool = False,
     standardize: Literal["std", "minmax"] | None = "std",
+    ms1scans_no_array: pd.DataFrame | None = None,
+    data_unit: Literal["peak", "activation"] = "peak",
+    peak_results: pd.DataFrame | None = None,
+    margin: int = 3,
+    method: Literal["mask", "clip"] = "mask",
+    ref_exp_inner_df: pd.DataFrame | None = None,
+    pad: bool = True,
+    pad_value: float = -1.0,
+    pad_pos: Literal["post", "two_side"] = "two_side",
+    max_len: int | None = None,
+) -> (np.ndarray, np.ndarray):
+    """
+    Prepare the input as arrays for peak classification.
+
+    :param activation_df: DataFrame containing activation data.
+    :param log_intensity: Flag indicating whether to apply logarithmic transformation to intensity values.
+    :param standardize: Method for standardizing the data. Options are "std" for standardization, \
+        "minmax" for min-max scaling, or None for no standardization.
+    :param ms1scans_no_array: DataFrame containing MS1 scan data for matching time to scan. \
+        Only required if scan information is not available.
+    :param data_unit: Unit of the data to be prepared. \
+        Options are "peak" for one peak per data point or \
+             "activation" for one activation curve per data point.
+    :param peak_results: DataFrame containing peak results. Only required for data_unit = "peak". \
+        Must contain "id", "start_scan", "end_scan", \
+            "RT_search_left_scan", and "RT_search_right_scan" columns.
+    :param margin: Margin value used for peak sequence. Only required for data_unit = "peak".
+    :param method: Method for peak selection. Only required for data_unit = "peak". \
+        Options are "mask" for masking the peaks or "clip" for clipping the peaks.
+    :param ref_exp_inner_df: DataFrame containing reference experiment inner data. \
+        Only required for data_unit = "activation".
+    
+    :return: Arrays containing the prepared input sequences and labels.
+    """
+    activation_df_std = transform_activation(activation_df, log_intensity, standardize)
+    if "matched" not in peak_results.columns:
+        Logger.info("No matched results found. Set all to False.")
+        peak_results["matched"] = False
+    match data_unit:
+        case "peak":
+            if "RT_search_left_scan" not in peak_results.columns:
+                Logger.info("Match time to scan for the peak results dataframe.")
+                peak_results = match_time_to_scan(
+                    peak_results,
+                    time_cols=["RT_search_left", "RT_search_right"],
+                    ms1scans_no_array=ms1scans_no_array,
+                )
+            peaks = peak_results.apply(
+                _prepare_peak_roi_row,
+                axis=1,
+                activation_df_std=activation_df_std,
+                margin=margin,
+                method=method,
+            )
+            seq = peaks.values
+            label = peak_results["matched"].values
+            if pad:
+                seq = pad_seq(seq, value=pad_value, pad_pos=pad_pos, maxlen=max_len)
+        case "activation":
+            label, seq = _prepare_activation_seq_and_label(
+                ref_exp_inner_df=ref_exp_inner_df,
+                activation_df_std=activation_df_std,
+                ms1cans_no_array=ms1scans_no_array,
+            )
+            if pad:
+                seq = pad_seq(seq, value=pad_value, pad_pos=pad_pos, maxlen=max_len)
+                label = pad_seq(label, value=pad_value, pad_pos=pad_pos, maxlen=max_len)
+    Logger.info("Sequence shape: %s", seq.shape)
+    Logger.info("Label shape: %s", label.shape)
+    assert seq.shape[0] == label.shape[0], "Sequence and label shape mismatch!"
+    return seq, label.astype(np.int32)
+
+
+def _prepare_peak_roi_row(
+    peak_results_row: pd.Series,
+    activation_df_std: pd.DataFrame,
     margin: int = 3,
     method: Literal["mask", "clip"] = "mask",
 ):
-    """Prepare the peak input as arrays for peak classification"""
-    activation_df_std = transform_activation(activation_df, log_intensity, standardize)
-
-    def _get_roi(peak_results_row: pd.Series, method: Literal["mask", "clip"] = "mask"):
-        """Get the region of interest from the activation dataframe"""
-        start_index = peak_results_row["start_scan"] - margin
-        end_index = peak_results_row["end_scan"] + margin
-        match method:
-            case "mask":  # get roi by masking out the rest
-                original_row = activation_df_std.loc[peak_results_row["id"]].values
-                new_row = np.zeros_like(original_row)
-                new_row[start_index : end_index + 1] = original_row[
-                    start_index : end_index + 1
+    """Get the region of interest from the activation dataframe"""
+    start_index = peak_results_row["start_scan"] - margin
+    end_index = peak_results_row["end_scan"] + margin
+    match method:
+        case "mask":  # get roi by masking out the rest
+            original_row = activation_df_std.loc[peak_results_row["id"]].values
+            new_row = np.zeros_like(original_row)
+            new_row[start_index : end_index + 1] = original_row[
+                start_index : end_index + 1
+            ]
+            return new_row[
+                peak_results_row["RT_search_left_scan"] : peak_results_row[
+                    "RT_search_right_scan"
                 ]
-                return new_row[
-                    peak_results_row["sbs_window_left_scan"] : peak_results_row[
-                        "sbs_window_right_scan"
-                    ]
-                    + 1
-                ]
-            case "clip":  # get roi by clipping the rest
-                return activation_df_std.loc[
-                    peak_results_row["id"],
-                    start_index : end_index + 1,
-                ].values
-
-    peaks = peak_results.apply(_get_roi, axis=1, method=method)
-    return peaks.values
+                + 1
+            ]
+        case "clip":  # get roi by clipping the rest
+            return activation_df_std.loc[
+                peak_results_row["id"],
+                start_index : end_index + 1,
+            ].values
 
 
-def prepare_seq_input_label(
-    activation_df: pd.DataFrame,
-    ref_dict_exp_inner_df: pd.DataFrame,
-    log_intensity: bool = False,
-    standardize: Literal["std", "minmax"] | None = "std",
+def _prepare_activation_seq_and_label(
+    activation_df_std: pd.DataFrame,
+    ref_exp_inner_df: pd.DataFrame,
+    ms1cans_no_array: pd.DataFrame | None = None,
 ):
-    activation_df_std = transform_activation(activation_df, log_intensity, standardize)
-    ref_dict_exp_inner_df.index = ref_dict_exp_inner_df.index.astype(int)
+    """Prepare the label for data_unit = "activation" """
 
-    def mark_peak(ref_dict_exp_inner_df_row):
-        precursor_id = ref_dict_exp_inner_df_row.id
-        (
-            sbs_window_left_scan,
-            sbs_window_right_scan,
-        ) = ref_dict_exp_inner_df_row.loc[
-            ["sbs_window_left_scan", "sbs_window_right_scan"]
-        ].astype(int)
-        label = np.zeros_like(activation_df_std.iloc[0].values)
-        label[
-            ref_dict_exp_inner_df_row[
-                "Calibrated retention time start_scan"
-            ] : ref_dict_exp_inner_df_row["Calibrated retention time finish_scan"]
-        ] = 1
-        activation_df_row = activation_df_std.loc[precursor_id]
-        return (
-            label[sbs_window_left_scan : sbs_window_right_scan + 1],
-            activation_df_row[sbs_window_left_scan : sbs_window_right_scan + 1].values,
+    ref_exp_inner_df.index = ref_exp_inner_df.index.astype(int)
+    if "Calibrated retention time start_scan" not in ref_exp_inner_df.columns:
+        Logger.info("Match time to scan for the reference experiment dataframe.")
+        ref_exp_inner_df = match_time_to_scan(
+            ref_exp_inner_df,
+            time_cols=[
+                "Calibrated retention time start",
+                "Calibrated retention time finish",
+                "RT_search_left",
+                "RT_search_right",
+            ],
+            ms1scans_no_array=ms1cans_no_array,
         )
-
-    all_results = ref_dict_exp_inner_df.apply(mark_peak, axis=1, result_type="expand")
-    label = all_results[0].values
-    seq = all_results[1].values
+    label_and_seq = ref_exp_inner_df.apply(
+        _prepare_activation_row,
+        axis=1,
+        result_type="expand",
+        activation_df_std=activation_df_std,
+    )
+    label = label_and_seq[0].values
+    seq = label_and_seq[1].values
     return label, seq
 
 
-class PeakSegModel:
-    def __init__(
-        self,
-        seq_input: np.ndarray,
-        seq_label: np.ndarray,
-    ):
-        self.seq_input = seq_input
-        self.seq_label = seq_label
+def _prepare_activation_row(
+    ref_exp_inner_df_row: pd.Series, activation_df_std: pd.DataFrame
+):
+    precursor_id = ref_exp_inner_df_row.id
+    example_seq = activation_df_std.loc[precursor_id].values
+    label = np.zeros_like(example_seq)
+    label[
+        ref_exp_inner_df_row[
+            "Calibrated retention time start_scan"
+        ] : ref_exp_inner_df_row["Calibrated retention time finish_scan"]
+    ] = 1
+    seq = activation_df_std.loc[precursor_id].values
+    seq = seq[
+        ref_exp_inner_df_row["RT_search_left_scan"] : ref_exp_inner_df_row[
+            "RT_search_right_scan"
+        ]
+        + 1
+    ]
+    label = label[
+        ref_exp_inner_df_row["RT_search_left_scan"] : ref_exp_inner_df_row[
+            "RT_search_right_scan"
+        ]
+        + 1
+    ]
+    assert seq.shape[0] == label.shape[0], "Sequence and label shape mismatch!"
+    return label, seq
 
-    def pad_peak_input(
-        self,
-        maxlen: int | None = None,
-        value: float = -1.0,
-        padding: Literal["post", "two_side"] = "post",
-    ):
-        if maxlen is None:
-            maxlen = max(map(len, self.seq_input))
-        self.maxlen = maxlen
+
+def pad_seq(
+    seq: np.ndarray,
+    maxlen: int | None = None,
+    value: float = -1.0,
+    pad_pos: Literal["post", "two_side"] = "two_side",
+):
+    """Pad the sequence to the same length."""
+    if maxlen is None:
+        maxlen = max(map(len, seq))
         Logger.debug("Max length: %s", maxlen)
-        match padding:
-            case "post":
-
-                @jit(nopython=True)
-                def pad_sequence(peak, maxlen, value):
-                    result = np.full((maxlen,), value)
-                    result[: len(peak)] = peak
-                    return result
-
-            case "two_side":
-
-                @jit(nopython=True)
-                def pad_sequence(peak, maxlen, value):
-                    result = np.full((maxlen,), value)
-                    pad_length = maxlen - len(peak)
-                    before = pad_length // 2
-                    result[before : before + len(peak)] = peak
-                    return result
-
-        self.padded_sequences_input = np.array(
-            [pad_sequence(peak, maxlen, value) for peak in self.seq_input]
-        ).astype(np.float32)
-
-        self.padded_sequences_label = np.array(
-            [pad_sequence(peak, maxlen, 0) for peak in self.seq_label]
-        ).astype(np.float32)
-
-        # Logger.debug("Padded sequences type: %s", self.padded_sequences_input.dtype)
-
-    def plot_sbswindow_with_mask(self, row_id: int):
-        fig, ax = plt.subplots(figsize=(20, 10))
-        ax2 = ax.twinx()
-        ax.plot(self.padded_sequences_input[row_id], color="blue")
-        ax2.plot(self.padded_sequences_label[row_id], color="red")
-        plt.show()
+    match pad_pos:
+        case "post":
+            padded_seq = np.array(
+                [_pad_seq_post(s, maxlen, value) for s in seq]
+            ).astype(np.float32)
+        case "two_side":
+            padded_seq = np.array(
+                [_pad_seq_two_side(s, maxlen, value) for s in seq]
+            ).astype(np.float32)
+    Logger.info("Padded sequence shape: %s", padded_seq.shape)
+    return padded_seq
 
 
-class PeakClsModel:
-    def __init__(
-        self,
-        peak_input: np.ndarray,
-        peak_results: pd.DataFrame | None = None,
-        peak_label: np.ndarray | None = None,
-        precursor_id: np.ndarray | None = None,
-        random_seed: int = 42,
-        initial_bias: Union[float, None, Literal["auto"]] = None,
-        use_class_weight: bool = False,
-    ):
-        self.peak_input = peak_input
-        self.random_seed = random_seed
+@jit(nopython=True)
+def _pad_seq_post(peak, maxlen, value):
+    result = np.full((maxlen,), value)
+    result[: len(peak)] = peak
+    return result
 
-        if peak_results is not None:
-            self.peak_results = peak_results
-            self.peak_label = peak_results["matched"]
-            self.precursor_id = peak_results["id"]
-        else:
-            assert peak_label is not None
-            assert precursor_id is not None
-            self.peak_label = peak_label
-            self.precursor_id = precursor_id
-        self.label_list = sorted(list(set(self.peak_label)))
-        self.padded_sequences = None
-        self.mask = None
-        self.initial_bias = initial_bias
-        self.use_class_weight = use_class_weight
-        self.maxlen = None
 
-    def report_data_distribution(self):
-        print("Number of precursors:", len(set(self.precursor_id)))
-        print(
-            "Label"
-            f" distribution:\n{self.peak_results['matched'].value_counts().to_string()}"
+@jit(nopython=True)
+def _pad_seq_two_side(peak, maxlen, value):
+    if len(peak) > maxlen:
+        diff = len(peak) - maxlen
+        start = diff // 2
+        end = start + maxlen
+        return peak[start:end]
+    else:
+        result = np.full((maxlen,), value)
+        pad_length = maxlen - len(peak)
+        before = pad_length // 2
+        result[before : before + len(peak)] = peak
+        return result
+
+
+def split_data(
+    seq: np.ndarray,
+    label: np.ndarray,
+    precursor_id: np.ndarray | None = None,
+    test_ratio: float = 0.2,
+    val_ratio: float = 0.2,
+    random_seed: int | None = None,
+) -> (np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray):
+    """Split the data into training and testing sets.
+    :param seq: Input sequences.
+    :param label: Labels.
+    :param precursor_id: Precursor id for splitting data by precursor id. \
+        If not available, split data randomly.
+    :param train_ratio: Ratio of the training set.
+    :param random_seed: Random seed for reproducibility.
+
+    :return: Training and testing sets.
+    """
+    if random_seed is not None:
+        np.random.seed(random_seed)
+    train_ratio = 1 - test_ratio - val_ratio
+    if precursor_id is not None:
+        Logger.info("Split data by precursor id.")
+        unique_precursor_id = np.unique(precursor_id)
+        np.random.shuffle(unique_precursor_id)
+        train_precursor_id = unique_precursor_id[
+            : int(len(unique_precursor_id) * train_ratio)
+        ]
+        test_precursor_id = unique_precursor_id[
+            -int(len(unique_precursor_id) * test_ratio) :
+        ]
+        train_indices = np.where(np.isin(precursor_id, train_precursor_id))[0]
+        test_indices = np.where(np.isin(precursor_id, test_precursor_id))[0]
+        if val_ratio > 0:
+            val_precursor_id = unique_precursor_id[
+                int(len(unique_precursor_id) * train_ratio) : int(
+                    len(unique_precursor_id) * (train_ratio + val_ratio)
+                )
+            ]
+            val_indices = np.where(np.isin(precursor_id, val_precursor_id))[0]
+    else:
+        Logger.info("Precursor id not available, splitting data randomly.")
+        indices = np.arange(len(seq))
+        np.random.shuffle(indices)
+        train_indices = indices[: int(len(indices) * train_ratio)]
+        test_indices = indices[-int(len(indices) * test_ratio) :]
+        if val_ratio > 0:
+            val_indices = indices[
+                int(len(indices) * train_ratio) : int(
+                    len(indices) * (train_ratio + val_ratio)
+                )
+            ]
+    seq_train = seq[train_indices]
+    seq_test = seq[test_indices]
+    label_train = label[train_indices]
+    label_test = label[test_indices]
+    if val_ratio > 0:
+        seq_val = seq[val_indices]
+        label_val = label[val_indices]
+        return (
+            seq_train,
+            seq_val,
+            seq_test,
+            label_train,
+            label_val,
+            label_test,
+            train_indices,
+            val_indices,
+            test_indices,
         )
-        print(f"All peak results:\n{self.peak_results.describe().to_string()}")
-        print("Positive peak results:")
-        print(
-            self.peak_results[self.peak_results["matched"] == 1].describe().to_string()
-        )
-        print("Negative peak results:")
-        print(
-            self.peak_results[self.peak_results["matched"] == 0].describe().to_string()
-        )
-        print("Number of peaks for each precursor:")
-        print(self.peak_results.groupby("id").size().describe().to_string())
-        self.peak_results.groupby("id").size().hist(
-            bins=self.peak_results.groupby("id").size().max()
-        )
+    return seq_train, seq_test, label_train, label_test, train_indices, test_indices
 
-    def pad_peak_input(
-        self,
-        maxlen: int | None = None,
-        value: float = -1.0,
-        padding: Literal["post", "two_side"] = "post",
-    ):
-        if maxlen is None:
-            maxlen = max(map(len, self.peak_input))
-        self.maxlen = maxlen
-        match padding:
-            case "post":
 
-                @jit(nopython=True)
-                def pad_sequence(peak, maxlen, value):
-                    result = np.full((maxlen,), value)
-                    result[: len(peak)] = peak
-                    return result
+def evaluate_class_distribution(label: np.ndarray):
+    """Evaluate the class distribution of the label.
 
-            case "two_side":
+    return initial_bias and class_weight
+    """
+    class_distribution = pd.Series(label).value_counts(normalize=False)
+    Logger.info("Class distribution: %s", class_distribution)
+    pos = class_distribution[1]
+    neg = class_distribution[0]
+    inital_bias = np.log([pos / neg])
+    total = neg + pos
+    weight_for_0 = (1 / neg) * (total / 2.0)
+    weight_for_1 = (1 / pos) * (total / 2.0)
+    class_weight = {0: weight_for_0, 1: 1 / weight_for_1}
+    return inital_bias, class_weight
 
-                @jit(nopython=True)
-                def pad_sequence(peak, maxlen, value):
-                    result = np.full((maxlen,), value)
-                    pad_length = maxlen - len(peak)
-                    if pad_length >= 0:
-                        before = pad_length // 2
-                        # after = pad_length - before
-                        result[before : before + len(peak)] = peak
-                    if pad_length < 0:
-                        print(
-                            "peak input longer than maxlen, peak input will be clipped!"
-                        )
-                        before = abs(pad_length) // 2
-                        # after = pad_length - before
-                        result = peak[before : before + pad_length]
-                    return result
 
-        self.padded_sequences = np.array(
-            [pad_sequence(peak, maxlen, value) for peak in self.peak_input]
-        ).astype(np.float32)
-        Logger.debug("Padded sequences type: %s", self.padded_sequences.dtype)
+# TODO: the following resampling leads to val performance always classifying 0
+# def make_tf_dataset(
+#     seq: np.ndarray,
+#     label: np.ndarray,
+#     balance_by_resample: bool = False,
+#     batch_size: int = 32,
+# ):
+#     """Make a tf.data.Dataset from the input sequences and labels."""
 
-    def split_data(self, by_precrusor: bool = True, normalize: bool = True):
-        np.random.seed(self.random_seed)
-        if by_precrusor:
-            unique_ids = list(set(self.precursor_id))
-            np.random.shuffle(unique_ids)
+#     def make_ds(features, labels):
+#         ds = tf.data.Dataset.from_tensor_slices((features, labels))
+#         # ds = ds.shuffle(10000).repeat() # Don't shuffle since it was already done in split_data
+#         return ds
 
-            self.train_ids = unique_ids[: int(len(unique_ids) * 0.8)]
-            self.test_ids = unique_ids[int(len(unique_ids) * 0.8) :]
+#     if balance_by_resample:
+#         pos_features = seq[label == 1]
+#         neg_features = seq[label == 0]
+#         pos_labels = label[label == 1]
+#         neg_labels = label[label == 0]
 
-            self.train_indices = np.where(self.precursor_id.isin(self.train_ids))[0]
-            Logger.debug(
-                "Train indices top 5 max: %s",
-                (-self.train_indices).argsort()[:5],
-            )
-            self.test_indices = np.where(self.precursor_id.isin(self.test_ids))[0]
-        else:
-            indices = np.arange(len(self.padded_sequences))
-            np.random.shuffle(indices)
+#         pos_ds = make_ds(pos_features, pos_labels)
+#         neg_ds = make_ds(neg_features, neg_labels)
+#         resampled_ds = tf.data.Dataset.sample_from_datasets(
+#             [pos_ds, neg_ds], weights=[0.5, 0.5]
+#         )
+#         Logger.info("Resampled dataset: %s", len(list(resampled_ds)))
+#         resampled_ds = resampled_ds.batch(batch_size).prefetch(2)
+#         return resampled_ds
+#     else:
+#         ds = make_ds(seq, label)
+#         Logger.info("Dataset: %s", len(list(ds)))
+#         ds = ds.batch(batch_size).prefetch(2)
+#         return ds
 
-            self.train_indices = indices[: int(len(indices) * 0.8)]
-            self.test_indices = indices[int(len(indices) * 0.8) :]
 
-        X_train = self.padded_sequences[self.train_indices]
-        X_test = self.padded_sequences[self.test_indices]
-        Logger.debug("X_train shape: %s", X_train.shape)
-        if normalize:
-            scaler = StandardScaler()
-            X_train = scaler.fit_transform(X_train)
-            X_test = scaler.transform(X_test)
-
-        self.X_train = X_train.reshape(X_train.shape[0], X_train.shape[1], 1)
-        self.X_test = X_test.reshape(X_test.shape[0], X_test.shape[1], 1)
-        Logger.debug("X_train type: %s", self.X_train.dtype)
-        Logger.debug("X_train shape: %s", self.X_train.shape)
-
-        self.y_train = self.peak_label[self.train_indices].values
-        Logger.debug("Y_train type: %s", self.X_train.dtype)
-        Logger.debug("Y_train shape: %s", self.y_train.shape)
-
-        self.y_test = self.peak_label[self.test_indices].values
-
-        neg, pos = np.bincount(self.y_train)
-        self.neg, self.pos = neg, pos
-        total = neg + pos
-        if self.initial_bias == "auto":
-            print(
-                "Examples:\n    Total: {}\n    Positive: {} ({:.2f}% of"
-                " total)\n".format(total, pos, 100 * pos / total)
-            )
-            self.initial_bias = np.log([pos / neg])
-            Logger.debug("Automatically calculate output bias: %s", self.initial_bias)
-        if self.use_class_weight:
-            # Scaling by total/2 helps keep the loss to a similar magnitude.
-            # The sum of the weights of all examples stays the same.
-            weight_for_0 = (1 / neg) * (total / 2.0)
-            weight_for_1 = (1 / pos) * (total / 2.0)
-
-            self.class_weight = {0: weight_for_0, 1: weight_for_1}
-        else:
-            self.class_weight = None
-        self.resampled_ds = None
-
-    def resample_train_data(
-        self,
-        resample_method: Literal["oversample", "undersample"],
-        BUFFER_SIZE: int = 100000,
-        BATCH_SIZE: int = 256,
-    ):
-        self.BATCH_SIZE = BATCH_SIZE
-        pos_features = self.X_train[self.y_train == 1]
-        neg_features = self.X_train[self.y_train == 0]
-        pos_labels = self.y_train[self.y_train == 1]
-        neg_labels = self.y_train[self.y_train == 0]
-        match resample_method:
-            case "oversample":  # oversample the minority class (positive class)
-                ids = np.arange(len(pos_features))
-                choices = np.random.choice(ids, len(neg_features))
-
-                res_pos_features = pos_features[choices]
-                res_pos_labels = pos_labels[choices]
-
-                Logger.debug(
-                    "Oversampling positive features, resampled positive"
-                    " features shape: %s",
-                    res_pos_features.shape,
-                )
-
-                resampled_features = np.concatenate(
-                    [res_pos_features, neg_features], axis=0
-                )
-                resampled_labels = np.concatenate([res_pos_labels, neg_labels], axis=0)
-            case "undersample":  # undersample the majority class (negative class)
-                ids = np.arange(len(neg_features))
-                choices = np.random.choice(ids, len(pos_features))
-
-                res_neg_features = neg_features[choices]
-                res_neg_labels = neg_labels[choices]
-
-                Logger.debug(
-                    "Undersampling negative features, resampled negative"
-                    " features shape: %s",
-                    res_neg_features.shape,
-                )
-
-                resampled_features = np.concatenate(
-                    [res_neg_features, pos_features], axis=0
-                )
-                resampled_labels = np.concatenate([res_neg_labels, pos_labels], axis=0)
-
-        order = np.arange(len(resampled_labels))
-        np.random.shuffle(order)
-        resampled_features = resampled_features[order]
-        resampled_labels = resampled_labels[order]
-
-        Logger.debug("Resampled features shape: %s", resampled_features.shape)
-
-        def make_ds(features, labels):
-            ds = tf.data.Dataset.from_tensor_slices((features, labels))  # .cache()
-            ds = ds.shuffle(BUFFER_SIZE).repeat()
-            return ds
-
-        pos_ds = make_ds(pos_features, pos_labels)
-        neg_ds = make_ds(neg_features, neg_labels)
-
-        for features, label in pos_ds.take(1):
-            Logger.debug("Features shape: %s", features.shape)
-            Logger.debug("Label: %s", label.numpy())
-
-        resampled_ds = tf.data.Dataset.sample_from_datasets(
-            [pos_ds, neg_ds], weights=[0.5, 0.5]
-        )
-        self.resampled_ds = resampled_ds.batch(BATCH_SIZE).prefetch(2)
-
-        for features, label in self.resampled_ds.take(1):
-            Logger.debug("Label mean: %s", label.numpy().mean())
-        self.resampled_steps_per_epoch = np.ceil(2.0 * self.neg / self.BATCH_SIZE)
-        val_ds = tf.data.Dataset.from_tensor_slices((self.X_test, self.y_test)).cache()
-        self.val_ds = val_ds.batch(BATCH_SIZE).prefetch(2)
-
-    def make_model(
-        self,
-        config: dict,
-    ):
-        output_bias = None
-
-        if isinstance(self.initial_bias[0], float) and self.resampled_ds is None:
-            output_bias = Constant(self.initial_bias)
-            Logger.debug("Output bias: %s", output_bias)
-
-        # if model then load existing trained model
-        match config["model"]:
-            case "LSTM":
-                self.y_train = self.y_train.reshape(-1, 1)
-                # Build the LSTM model with Masking layer
-                model = Sequential()
-                model.add(
-                    Masking(mask_value=-1)
-                )  # Masking layer with the padding marker
-                model.add(
-                    LSTM(
-                        config["lstm_n_units"],
-                        activation="relu",
-                        input_shape=(1, self.maxlen),
-                    )
-                )
-                model.add(
-                    Dense(
-                        1,
-                        activation="sigmoid",
-                        use_bias=True,
-                        bias_initializer=output_bias,
-                        name="dense_prediction",
-                    )
-                )
-
-                model.compile(
-                    optimizer=Adam(learning_rate=config["learning_rate"]),
-                    loss=BinaryCrossentropy(),
-                    metrics=config["metric"],
-                )
-                self.class_model = model
-            case "CNN":
-                # Build the CNN model with Masking layer
-                model = Sequential()
-                model.add(
-                    Masking(mask_value=-1)
-                )  # Masking layer with the padding marker
-                model.add(
-                    Conv1D(
-                        filters=config["conv1_n_filters"],
-                        kernel_size=config["conv1_kernel_size"],
-                        activation="relu",
-                        input_shape=(None, self.maxlen),
-                    )
-                )
-                model.add(
-                    Conv1D(
-                        filters=config["conv2_n_filters"],
-                        kernel_size=config["conv2_kernel_size"],
-                        activation="relu",
-                        input_shape=(None, self.maxlen),
-                    )
-                )
-                model.add(GlobalMaxPooling1D())
-                model.add(
-                    Dense(
-                        config["dense1_n"],
-                        kernel_regularizer=regularizers.l2(config["dense1_reg_rate"]),
-                        activation="relu",
-                        name="dense_1",
-                    )
-                )
-                model.add(Dropout(config["dropout_rate"], name="dropout_1"))
-                model.add(
-                    Dense(
-                        1,
-                        activation="sigmoid",
-                        use_bias=True,
-                        bias_initializer=output_bias,
-                        name="dense_prediction",
-                    )
-                )
-
-                model.compile(
-                    optimizer=Adam(learning_rate=config["learning_rate"]),
-                    loss=BinaryCrossentropy(),
-                    metrics=METRICS,
-                )
-                self.class_model = model
-            case _:
-                model_path = pathlib.Path(model)
-                Logger.info("Using existing model: %s", model_path.resolve())
-                self.class_model = load_model(model)
-
-    def train_model(self, epochs=1000, weight_class: bool = False, **kwargs):
-        # Define early stopping callback
-        early_stopping = EarlyStopping(
-            monitor="val_prc",
-            verbose=1,
-            patience=10,
-            mode="max",
-            restore_best_weights=True,
+def rank_among_collinear_candidates(item, list_without_item):
+    """Rank the item among collinear candidates."""
+    list_without_item.append(item)
+    list_length = len(list_without_item)
+    item_rank = list_without_item.index(item) + 1
+    if list_length == 1:
+        return 1  # Maximum score for the only item in the list
+    else:
+        # Scale factor to ensure scores are between 0 and 1
+        scale_factor = 1.0 / (1 - math.exp(-1))
+        return scale_factor * (
+            1 - math.exp(-(list_length - item_rank + 1) / list_length)
         )
 
-        Logger.info("Class weights: %s", self.class_weight)
-        if self.resampled_ds is not None:
-            Logger.info("Use balanced dataset for training, set bias to zero")
-            self.class_model.fit(
-                self.resampled_ds,
-                validation_data=self.val_ds,
-                epochs=epochs,
-                steps_per_epoch=self.resampled_steps_per_epoch,
-                callbacks=[early_stopping],
-                class_weight=self.class_weight,
-                batch_size=self.BATCH_SIZE,
-                **kwargs,
-            )
-        else:
-            self.class_model.fit(
-                self.X_train,
-                self.y_train,
-                validation_data=(self.X_test, self.y_test),
-                epochs=epochs,
-                callbacks=[early_stopping],
-                class_weight=self.class_weight,
-                **kwargs,
-            )
 
-    def evaluate_id_based_cls(self, top_n: int = 1):
-        # Predict probabilities
-        y_test_pred_prob = self.class_model.predict(self.X_test)
+########################################################################################
+# The following functions are used for model training and tuning
 
-        # Create a DataFrame with precursor_ids, predicted probabilities, and actual labels
-        df_test = pd.DataFrame(
-            {
-                "precursor_id": self.precursor_id[self.test_indices],
-                "y_pred_prob": y_test_pred_prob.flatten(),
-                "y_true": self.y_test,
-            }
+
+def make_cnn_model(config: dict, output_bias=None):
+    """Make the CNN model."""
+    if output_bias is not None:
+        Logger.info("Output bias using : %s", output_bias)
+        output_bias = tf.keras.initializers.Constant(output_bias)
+
+    model = Sequential()
+    model.add(Masking(mask_value=-1))
+    model.add(
+        Conv1D(
+            filters=config["conv1_n_filters"],
+            kernel_size=config["conv1_kernel_size"],
+            activation="relu",
         )
-        if top_n == 1:
-            # For each precursor_id, assign 1 to the highest probability and 0 to the rest
-            df_test["y_pred"] = (
-                df_test.groupby("precursor_id")["y_pred_prob"]
-                .transform(lambda x: x == x.max())
-                .astype(int)
-            )
-        else:
-            # For each precursor_id, assign 1 to the top_n highest probabilities and 0 to the rest
-            df_test["rank"] = df_test.groupby("precursor_id")["y_pred_prob"].rank(
-                method="first", ascending=False
-            )
-            df_test["y_pred"] = (df_test["rank"] <= top_n).astype(int)
-            df_test.drop(columns=["rank"], inplace=True)
+    )
+    model.add(
+        Conv1D(
+            filters=config["conv2_n_filters"],
+            kernel_size=config["conv2_kernel_size"],
+            activation="relu",
+        )
+    )
+    model.add(
+        Conv1D(
+            filters=config["conv3_n_filters"],
+            kernel_size=config["conv3_kernel_size"],
+            activation="relu",
+        )
+    )
+    model.add(GlobalAveragePooling1D())
+    model.add(
+        Dense(
+            config["dense1_n_units"],
+            kernel_regularizer=regularizers.l2(config["dense1_reg_rate"]),
+            activation="relu",
+            name="dense_1",
+        )
+    )
+    model.add(
+        Dense(
+            config["dense2_n_units"],
+            kernel_regularizer=regularizers.l2(config["dense2_reg_rate"]),
+            activation="relu",
+            name="dense_2",
+        )
+    )
+    model.add(
+        Dense(
+            config["dense3_n_units"],
+            kernel_regularizer=regularizers.l2(config["dense3_reg_rate"]),
+            activation="relu",
+            name="dense_3",
+        )
+    )
+    model.add(Dropout(config["dropout_rate"], name="dropout_1"))
+    model.add(
+        Dense(
+            1,
+            activation="sigmoid",
+            name="dense_prediction",
+            bias_initializer=output_bias,
+        )
+    )
 
-        # only keep the true peak of each precursor_id
-        self.df_test = df_test.copy()
-        df_test = df_test[df_test["y_true"] == 1]
-
-        # Calculate accuracy
-        accuracy = accuracy_score(df_test["y_true"], df_test["y_pred"])
-
-        return accuracy
-
-    def get_model_summary(self):
-        self.class_model.summary()
-
-    def save_model(self, model_path: pathlib.Path):
-        self.class_model.save(model_path.resolve())
-        Logger.info("Saved model to: %s", model_path.resolve())
+    model.compile(
+        optimizer=Adam(learning_rate=config["learning_rate"]),
+        loss=BinaryCrossentropy(),
+        metrics=METRICS,
+    )
+    return model
 
 
 def model_tuner(hp, maxlen: int = 361, initial_bias: List[float] | None = -1.04778782):
@@ -739,7 +672,7 @@ def model_tuner(hp, maxlen: int = 361, initial_bias: List[float] | None = -1.047
     hp_dropout_rate = hp.Choice("dropout_rate", [0.0, 0.1, 0.2, 0.3, 0.4, 0.5])
     model.add(Dropout(hp_dropout_rate, name="dropout_1"))
     if isinstance(initial_bias, float):
-        output_bias = Constant(initial_bias)
+        output_bias = tf.keras.initializers.Constant(initial_bias)
         Logger.debug("Output bias: %s", output_bias)
     else:
         output_bias = None
@@ -761,78 +694,173 @@ def model_tuner(hp, maxlen: int = 361, initial_bias: List[float] | None = -1.047
     return model
 
 
-def model_tune_wandb(config, maxlen, output_bias: float | None = None):
-    model = Sequential()
-    model.add(Masking(mask_value=-1))  # Masking layer with the padding marker
-    model.add(
-        Conv1D(
-            filters=config["conv1_n_filters"],
-            kernel_size=config["conv1_kernel_size"],
-            activation="relu",
-            input_shape=(None, maxlen),
-        )
-    )
-    model.add(
-        Conv1D(
-            filters=config["conv2_n_filters"],
-            kernel_size=config["conv2_kernel_size"],
-            activation="relu",
-            input_shape=(None, maxlen),
-        )
-    )
-    model.add(GlobalMaxPooling1D())
-    model.add(
-        Dense(
-            config["dense1_n"],
-            kernel_regularizer=regularizers.l2(config["dense1_reg_rate"]),
-            activation="relu",
-            name="dense_1",
-        )
-    )
-    model.add(Dropout(config["dropout_rate"], name="dropout_1"))
-    model.add(
-        Dense(
-            1,
-            activation="sigmoid",
-            bias_initializer=output_bias,
-            name="dense_prediction",
-        )
-    )
-    return model
+########################################################################################
+# The following functions are used for evaluating the classification performance
 
 
-def evaluate_id_based_cls(class_model, mdl, top_n: int = 1):
-    # Predict probabilities
-    y_test_pred_prob = class_model.predict(mdl.X_test)
-
-    # Create a DataFrame with precursor_ids, predicted probabilities, and actual labels
-    df_test = pd.DataFrame(
+def produce_pred_df(
+    model: Sequential,
+    data: tf.data.Dataset,
+    precursor_id: np.ndarray,
+    data_idx: np.ndarray,
+    label: np.ndarray | None = None,
+):
+    """Produce a dataframe containing the predictions and true labels."""
+    if label is None:
+        label = np.zeros_like(data_idx)
+    y_pred = model.predict(data)
+    df = pd.DataFrame(
         {
-            "precursor_id": mdl.precursor_id[mdl.test_indices],
-            "y_pred_prob": y_test_pred_prob.flatten(),
-            "y_true": mdl.y_test,
+            "y_pred_prob": y_pred.flatten(),
+            "y_true": label.flatten(),
+            "precursor_id": precursor_id[data_idx],
         }
     )
+    return df
+
+
+def plot_pred_distr(
+    df: pd.DataFrame, save_dir: str | None = None, fig_spec_name: str = ""
+):
+    sns.kdeplot(
+        data=df,
+        x="y_pred_prob",
+        hue="y_true",
+        fill=True,
+        common_norm=True,
+        alpha=0.5,
+        linewidth=0,
+    )
+    plt.title("Prediction Distribution")
+    plt.xlabel("Prediction Score")
+    save_plot(save_dir=save_dir, fig_type_name="PredDistr", fig_spec_name=fig_spec_name)
+
+
+def evaluate_id_based_cls(df_test: pd.DataFrame, top_n: int = 1):
+    """Evaluate the classification accuracy based on highest scored peak per precursor_id."""
+    df_test_filtered = get_top_n_scored_peaks_by_precursor(df_test, top_n)
+
+    # only keep the true peak of each precursor_id
+    # df_test_filtered = df_test_filtered[df_test_filtered["y_true"] == 1]
+
+    # Calculate accuracy
+    if top_n > 1:
+        df_test_filtered = df_test_filtered.groupby("precursor_id").agg(
+            {"y_true": "sum"}
+        )
+        df_test_filtered["y_pred"] = 1
+
+    accuracy = accuracy_score(df_test_filtered["y_true"], df_test_filtered["y_pred"])
+    print(f"Accuracy for top {top_n} peaks: {accuracy:.4f}")
+    return df_test_filtered
+
+
+def get_top_n_scored_peaks_by_precursor(
+    df_test, top_n, id_col: str = "precursor_id", score_col: str = "y_pred_prob"
+):
+    df_test_filtered = df_test.copy()
     if top_n == 1:
         # For each precursor_id, assign 1 to the highest probability and 0 to the rest
-        df_test["y_pred"] = (
-            df_test.groupby("precursor_id")["y_pred_prob"]
+        df_test_filtered["y_pred"] = (
+            df_test_filtered.groupby(id_col)[score_col]
             .transform(lambda x: x == x.max())
             .astype(int)
         )
     else:
         # For each precursor_id, assign 1 to the top_n highest probabilities and 0 to the rest
-        df_test["rank"] = df_test.groupby("precursor_id")["y_pred_prob"].rank(
+        df_test_filtered["rank"] = df_test_filtered.groupby(id_col)[score_col].rank(
             method="first", ascending=False
         )
-        df_test["y_pred"] = (df_test["rank"] <= top_n).astype(int)
-        df_test.drop(columns=["rank"], inplace=True)
+        df_test_filtered["y_pred"] = (df_test_filtered["rank"] <= top_n).astype(int)
+        df_test_filtered.drop(columns=["rank"], inplace=True)
+    df_test_filtered = df_test_filtered[df_test_filtered["y_pred"] == 1]
 
-    # only keep the true peak of each precursor_id
-    mdl.df_test = df_test.copy()
-    df_test = df_test[df_test["y_true"] == 1]
+    return df_test_filtered
 
-    # Calculate accuracy
-    accuracy = accuracy_score(df_test["y_true"], df_test["y_pred"])
 
-    return accuracy, df_test
+def plot_activation_and_score(
+    peak_results,
+    df_test,
+    activation,
+    precursor_id: int,
+    cos_dist: pd.DataFrame | None = None,
+    save_dir: str | None = None,
+):
+    """Plot the activation and score for a precursor_id."""
+    peak_results_filtered = peak_results[peak_results["id"] == precursor_id]
+    df_test_filtered = df_test[df_test["precursor_id"] == precursor_id]
+    peak_results_score = pd.merge(
+        left=peak_results_filtered,
+        right=df_test_filtered,
+        right_index=True,
+        left_index=True,
+    )
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(activation.loc[precursor_id])
+    if cos_dist is not None:
+        ax1 = ax.twinx()
+        ax1.plot(cos_dist.loc[precursor_id], color="red")
+    ax.set_title(f"Activation for precursor_id {precursor_id}")
+
+    y_min, y_max = ax.get_ylim()
+    ax.set_xlim(
+        peak_results_score["RT_search_left_scan"].min(),
+        peak_results_score["RT_search_right_scan"].max(),
+    )
+    for row in peak_results_score.iterrows():
+        ax.fill_between(
+            [
+                row[1]["start_scan"],
+                row[1]["end_scan"],
+            ],
+            [y_min, y_min],
+            [y_max, y_max],
+            color="grey",
+            alpha=row[1]["y_pred_prob"],
+            label="Peak Score",
+        )
+    true_peak = peak_results_score[peak_results_score["matched"] == 1]
+    ax.add_patch(
+        Rectangle(
+            (true_peak["start_scan"].min(), y_min),
+            true_peak["end_scan"].max() - true_peak["start_scan"].min(),
+            y_max - y_min,
+            color="green",
+            alpha=1,
+            linewidth=2.5,
+            fill=False,
+            label="True Peak",
+        )
+    )
+    pred_peak = peak_results_score[
+        peak_results_score["y_pred_prob"].max() == peak_results_score["y_pred_prob"]
+    ]
+    ax.add_patch(
+        Rectangle(
+            (pred_peak["start_scan"].min(), y_min),
+            pred_peak["end_scan"].max() - pred_peak["start_scan"].min(),
+            y_max - y_min,
+            color="yellow",
+            alpha=1,
+            linewidth=2.5,
+            fill=False,
+            label="True Peak",
+        )
+    )
+    ax.vlines(
+        np.mean([true_peak["RT_search_left_scan"], true_peak["RT_search_right_scan"]]),
+        y_min,
+        y_max,
+        color="black",
+        linestyle="--",
+        label="Predicted RT",
+    )
+    ax.set_yscale("log")
+    # ax.legend()
+    plt.tight_layout()
+    save_plot(
+        save_dir=save_dir,
+        fig_type_name="ActivationPeakCls",
+        fig_spec_name=f"Activation_{precursor_id}",
+    )

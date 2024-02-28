@@ -26,6 +26,9 @@ def merge_with_maxquant_exp(
                 "Modified sequence",
                 "Charge",
                 "predicted_RT",
+                "m/z",
+                "Mass",
+                "Length",
                 "id",
                 "RT_search_left",
                 "RT_search_right",
@@ -107,8 +110,8 @@ def filter_merged_by_rt_overlap(
         condition,
         n_post_filter,
     )
-    Logger.debug("columns after filter by RT %s", n_post_filter.columns)
-    return n_post_filter
+    Logger.debug("columns after filter by RT %s", n_post_filter)
+    return filtered
 
 
 def sum_pcm_intensity_from_exp(maxquant_ref_and_exp: pd.DataFrame):
@@ -127,6 +130,9 @@ def sum_pcm_intensity_from_exp(maxquant_ref_and_exp: pd.DataFrame):
                 "Retention time": "median",
                 "Intensity": "sum",
                 "id": "first",
+                "Mass": "first",
+                "m/z": "first",
+                "Length": "first",
             }
         )
         .reset_index()

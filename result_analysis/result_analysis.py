@@ -118,6 +118,7 @@ def plot_corr_int_ref_and_act(
     sum_act,
     data=None,
     filter_thres: float = 1,
+    contour: bool = False,
     interactive: bool = False,
     show_diag: bool = True,
     color: Union[None, pd.Series] = None,
@@ -138,6 +139,7 @@ def plot_corr_int_ref_and_act(
         log_y=True,
         data=data,
         filter_thres=filter_thres,
+        contour=contour,
         interactive=interactive,
         hover_data=hover_data,
         show_diag=show_diag,
@@ -184,6 +186,7 @@ def FindStartAndEndScan(activation: np.ndarray, thres: float = 1.0):
 def plot_alphas_across_scan(
     scan_record: pd.DataFrame,
     x: Literal["Scan", "Time"] = "Scan",
+    save_dir: str | None = None,
 ):
     NonEmptyScans = scan_record.loc[scan_record["BestAlpha"] != None]
     EmptyScans = scan_record.loc[scan_record["BestAlpha"] == None]
@@ -209,6 +212,7 @@ def plot_alphas_across_scan(
     plt.xlabel(x)
     plt.ylabel("Alpha (log)")
     plt.title("Best Alpha over " + x)
+    save_plot(save_dir=save_dir, fig_type_name="Alpha_along", fig_spec_name=x)
 
 
 class SBSResult:
@@ -263,15 +267,31 @@ class SBSResult:
             Literal["full_overlap", "partial_overlap", "no_overlap"]
         ]  # TODO: refactor to the same place as compare_maxquant
         | None = None,
+        handle_mul_exp_pcm: Literal["drop", "agg", "preserve"] = "agg",
+        # agg_pcm_intensity: bool = True,
+        save_dir: str | None = None,
     ):
-        """Compare activation with the intensity of the precursors from the experiment file"""
+        """
+        Compare activation with the intensity of the precursors from the experiment file.
+
+        :param filter_by_rt_overlap: A list of conditions to filter the data based on retention time overlap.
+            Options are "full_overlap", "partial_overlap", or "no_overlap".
+        :type filter_by_rt_overlap: List[Literal["full_overlap", "partial_overlap", "no_overlap"]] or None, optional
+        :param agg_pcm_intensity: Whether to aggregate the precursor intensity from the experiment file.
+            If True, the intensity will be aggregated by the precursor charge combination.
+            If False, the intensity will not be aggregated.
+        :type agg_pcm_intensity: bool, optional
+        :param save_dir: The directory to save the plot. If None, the plot will not be saved.
+        :type save_dir: str or None, optional
+        """
         maxquant_ref_and_exp = merge_with_maxquant_exp(
             maxquant_exp_df=self.exp_df, maxquant_ref_df=self.ref_df
         )
 
-        maxquant_ref_and_exp = evaluate_rt_overlap(maxquant_ref_and_exp)
+        maxquant_ref_and_exp = evaluate_rt_overlap(
+            maxquant_ref_and_exp, save_dir=save_dir
+        )
         if filter_by_rt_overlap is not None:
-            assert evaluate_rt_overlap is True
             maxquant_ref_and_exp = filter_merged_by_rt_overlap(
                 condition=filter_by_rt_overlap,
                 maxquant_ref_and_exp=maxquant_ref_and_exp,
@@ -280,27 +300,32 @@ class SBSResult:
             Logger.info(
                 "No filter_by_rt_overlap is specified, use all entries for plotting."
             )
-
-        maxquant_ref_and_exp_sum_intensity = sum_pcm_intensity_from_exp(
-            maxquant_ref_and_exp
-        )
+        match handle_mul_exp_pcm:
+            case "drop":
+                n_pre_drop = maxquant_ref_and_exp.shape[0]
+                maxquant_ref_and_exp_sum_intensity = (
+                    maxquant_ref_and_exp.drop_duplicates(
+                        subset=["Modified sequence", "Charge"], keep=False
+                    )
+                )
+                n_post_drop = maxquant_ref_and_exp_sum_intensity.shape[0]
+                Logger.info(
+                    "Drop all duplicated pcm. %s -> %s", n_pre_drop, n_post_drop
+                )
+            case "agg":
+                maxquant_ref_and_exp_sum_intensity = sum_pcm_intensity_from_exp(
+                    maxquant_ref_and_exp
+                )
+            case "preserve":
+                maxquant_ref_and_exp_sum_intensity = maxquant_ref_and_exp
 
         maxquant_ref_and_exp_sum_intensity_act = add_sum_act_cols(
             maxquant_ref_and_exp_sum_intensity, self.sum_cols, self.ref_df
         )
-        try:
-            self.ref_exp_df_inner = maxquant_ref_and_exp_sum_intensity_act.loc[
-                maxquant_ref_and_exp_sum_intensity_act["SumActivationRaw"] > 0, :
-            ]
-        except KeyError:
-            Logger.info(
-                "SumActivationRaw column does not exist, use %s for generating"
-                " ref_exp_df_inner",
-                self.sum_cols[0],
-            )
-            self.ref_exp_df_inner = maxquant_ref_and_exp_sum_intensity_act.loc[
-                maxquant_ref_and_exp_sum_intensity[self.sum_cols[0]] > 0, :
-            ]
+
+        self.ref_exp_df_inner = maxquant_ref_and_exp_sum_intensity_act.loc[
+            maxquant_ref_and_exp_sum_intensity_act[self.sum_cols[0]] > 0, :
+        ]
 
     def plot_intensity_corr(
         self,

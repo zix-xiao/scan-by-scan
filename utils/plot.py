@@ -3,6 +3,7 @@ import os
 from typing import List, Set, Union, Literal
 
 import matplotlib.pyplot as plt
+from matplotlib import colormaps
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -24,7 +25,7 @@ def plot_pie(
     accumulative_threshold: float | None = None,
 ):
     """plot pie charts with accumulative threshold"""
-    fig1, ax1 = plt.subplots()
+    _, ax1 = plt.subplots()
     if accumulative_threshold is not None:
         # Sort sizes in descending order and get the sorted labels
         sorted_indices = np.argsort(sizes)[::-1]
@@ -35,7 +36,9 @@ def plot_pie(
         cumulative_sizes = np.cumsum(sorted_sizes)
 
         # Find the index where cumulative sum exceeds 95% of the total
-        idx = np.where(cumulative_sizes >= accumulative_threshold * cumulative_sizes[-1])[0][0]
+        idx = np.where(
+            cumulative_sizes >= accumulative_threshold * cumulative_sizes[-1]
+        )[0][0]
 
         # Include only the segments needed to reach 95% of the total
         sizes = sorted_sizes[: idx + 1]
@@ -44,7 +47,7 @@ def plot_pie(
         # Add 'Others' segment if there are remaining sizes
         if idx < len(sorted_sizes) - 1:
             sizes = np.append(sizes, sum(sorted_sizes[idx + 1 :]))
-            labels = np.append(labels, 'Others')
+            labels = np.append(labels, "Others")
 
     ax1.pie(sizes, labels=labels, autopct="%1.1f%%", startangle=90)
     ax1.axis("equal")  # Equal aspect ratio ensures that pie is drawn as a circle.
@@ -53,7 +56,7 @@ def plot_pie(
         save_dir=save_dir,
         fig_type_name="PieChart",
         fig_spec_name=fig_spec_name,
-        format="png",
+        fig_format="png",
         bbox_inches="tight",
     )
 
@@ -65,6 +68,7 @@ def plot_scatter(
     log_y: bool = False,
     data: Union[None, pd.DataFrame] = None,
     filter_thres: float = 0,
+    contour: bool = False,
     interactive: bool = False,
     hover_data: Union[None, List] = None,  # only used if interactive is true
     color: Union[None, pd.Series] = None,
@@ -113,7 +117,7 @@ def plot_scatter(
 
     PearsonR = stats.pearsonr(x=x_log, y=y_log)  # w/ log and w/o outliers
     SpearmanR = stats.spearmanr(a=x_log, b=y_log)
-    slope, intercept, r_value, p_value, std_err = stats.linregress(x=x_log, y=y_log)
+    slope, intercept, _, _, _ = stats.linregress(x=x_log, y=y_log)
     print(
         "Data: ",
         x_name,
@@ -179,38 +183,44 @@ def plot_scatter(
 
     else:
         # Plot with correlation
-        ax = sns.regplot(x=x_log, y=y_log, scatter=False, fit_reg=True)
-        sns.scatterplot(x=x_log, y=y_log, hue=color, linewidth=0, legend=False)  # type: ignore
-        ax.annotate(
-            "N = " + str(x_log.shape[0]),
-            xy=(0.2, 0.85),
-            xycoords="figure fraction",
-            horizontalalignment="left",
-            verticalalignment="top",
-            fontsize=7,
-        )
-        ax.annotate(
-            "Prs.r = "
-            + "{:.3f}".format(PearsonR[0])
-            + ", Sprm.r = "
-            + "{:.3f}".format(SpearmanR[0]),
-            xy=(0.2, 0.8),
-            xycoords="figure fraction",
-            horizontalalignment="left",
-            verticalalignment="top",
-            fontsize=7,
-        )
-        ax.annotate(
-            "slp. = "
-            + "{:.3f}".format(slope)
-            + ", intrcpt. = "
-            + "{:.3f}".format(intercept),
-            xy=(0.2, 0.75),
-            xycoords="figure fraction",
-            horizontalalignment="left",
-            verticalalignment="top",
-            fontsize=7,
-        )
+        if contour:
+            ax = sns.jointplot(x=x_log, y=y_log, kind="kde")
+            fig_type_name = "CorrQuantificationDensity"
+        else:
+            ax = sns.regplot(x=x_log, y=y_log, scatter=False, fit_reg=True)
+            sns.scatterplot(x=x_log, y=y_log, hue=color, linewidth=0, legend=False, ax=ax)  # type: ignore
+
+            ax.annotate(
+                "N = " + str(x_log.shape[0]),
+                xy=(0.2, 0.85),
+                xycoords="figure fraction",
+                horizontalalignment="left",
+                verticalalignment="top",
+                fontsize=7,
+            )
+            ax.annotate(
+                "Prs.r = "
+                + "{:.3f}".format(PearsonR[0])
+                + ", Sprm.r = "
+                + "{:.3f}".format(SpearmanR[0]),
+                xy=(0.2, 0.8),
+                xycoords="figure fraction",
+                horizontalalignment="left",
+                verticalalignment="top",
+                fontsize=7,
+            )
+            ax.annotate(
+                "slp. = "
+                + "{:.3f}".format(slope)
+                + ", intrcpt. = "
+                + "{:.3f}".format(intercept),
+                xy=(0.2, 0.75),
+                xycoords="figure fraction",
+                horizontalalignment="left",
+                verticalalignment="top",
+                fontsize=7,
+            )
+            fig_type_name = "CorrQuantification"
 
         min_val = min(x_log)
         max_val = max(x_log)
@@ -243,9 +253,7 @@ def plot_scatter(
         plt.xlabel(x_label)
         plt.ylabel(y_label)
         plt.suptitle(title + y_name)
-        save_plot(
-            save_dir=save_dir, fig_type_name="CorrQuantification", fig_spec_name=y_name
-        )
+        save_plot(save_dir=save_dir, fig_type_name=fig_type_name, fig_spec_name=y_name)
 
     return RegressionY.T, AbsResidue.T, valid_idx
 
@@ -266,7 +274,7 @@ def plot_venn2(
         save_dir=save_dir,
         fig_type_name="VennDiag",
         fig_spec_name=title,
-        format=save_format,
+        fig_format=save_format,
     )
 
 
@@ -288,7 +296,7 @@ def plot_venn3(
         save_dir=save_dir,
         fig_type_name="VennDiag",
         fig_spec_name=title,
-        format=save_format,
+        fig_format=save_format,
     )
 
 
@@ -316,16 +324,16 @@ def plot_comparison(
     axs[1].set_ylim([-axs[0].get_ylim()[1], 0])
 
 
-def save_plot(save_dir, fig_type_name, fig_spec_name, format="png", **kwargs):
+def save_plot(save_dir, fig_type_name, fig_spec_name, fig_format="png", **kwargs):
     if save_dir is not None:
         if not os.path.exists(save_dir):
             os.makedirs(save_dir)
         plt.savefig(
             fname=os.path.join(
-                save_dir, fig_type_name + "_" + fig_spec_name + "." + format
+                save_dir, fig_type_name + "_" + fig_spec_name + "." + fig_format
             ),
             dpi=300,
-            format=format,
+            format=fig_format,
             **kwargs,
         )
         plt.close()
@@ -345,8 +353,8 @@ def plot_true_and_predict(x, prediction, true, log: bool = False):
 
 
 def plot_isopattern_and_obs(
-    Maxquant_result,
-    MS1Scans: pd.DataFrame | None = None,
+    maxquant_result,
+    ms1_scans: pd.DataFrame | None = None,
     infer_intensity: Union[pd.Series, np.ndarray, None] = None,
     lower_plot: Literal["infer", "obs"] = "obs",
     scan_idx: Union[int, None] = None,
@@ -363,8 +371,8 @@ def plot_isopattern_and_obs(
 
     # Find precursor index if only precursor id is provided:
     if precursor_id is not None:
-        precursor_idx = Maxquant_result.loc[
-            Maxquant_result["id"].isin(precursor_id)
+        precursor_idx = maxquant_result.loc[
+            maxquant_result["id"].isin(precursor_id)
         ].index
 
     match lower_plot:
@@ -373,99 +381,107 @@ def plot_isopattern_and_obs(
             if scan_idx is None:
                 if precursor_idx is None:
                     raise ValueError("Please provide a precursor index.")
-                RT = np.max(
-                    Maxquant_result.loc[precursor_idx, "Retention time"].values
+                rt = np.max(
+                    maxquant_result.loc[precursor_idx, "Retention time"].values
                 )  # take the later RT of the precursors
-                scan_idx = np.abs(MS1Scans["starttime"] - RT).argmin()
-                scan_time = MS1Scans.loc[scan_idx, "starttime"]
+                scan_idx = np.abs(ms1_scans["starttime"] - rt).argmin()
+                scan_time = ms1_scans.loc[scan_idx, "starttime"]
                 Logger.info(
                     "Precursors %s retention time %s, \n show later RT %s with"
                     " corresponding scan index %s         with scan time %s",
                     precursor_idx,
-                    Maxquant_result.loc[precursor_idx, "Retention time"].values,
-                    RT,
+                    maxquant_result.loc[precursor_idx, "Retention time"].values,
+                    rt,
                     scan_idx,
                     scan_time,
                 )
-            OneScan = MS1Scans.iloc[scan_idx, :]
-            OneScanMZ = np.array(OneScan["mzarray"])
-            IsoMZ = None
+            one_scan = ms1_scans.iloc[scan_idx, :]
+            one_scan_mz = np.array(one_scan["mzarray"])
+            iso_mz = None
 
             # Find the range of mz in MS1 scan to plot
             if precursor_idx is not None:
-                IsoMZ = Maxquant_result.loc[precursor_idx, "IsoMZ"]
-                IsoMZ_flatten = np.concatenate(IsoMZ.values).ravel()
-                IsoMZ_range = [np.min(IsoMZ_flatten) - 1, np.max(IsoMZ_flatten) + 1]
-                OneScanMZinRange = OneScanMZ[
-                    (OneScanMZ > IsoMZ_range[0]) & (OneScanMZ < IsoMZ_range[1])
+                iso_mz = maxquant_result.loc[precursor_idx, "IsoMZ"]
+                iso_mz_flatten = np.concatenate(iso_mz.values).ravel()
+                iso_mz_range = [
+                    np.min(iso_mz_flatten) - 1,
+                    np.max(iso_mz_flatten) + 1,
                 ]
-                OneScanMZinRangeIdx = np.where(
-                    (OneScanMZ > IsoMZ_range[0]) & (OneScanMZ < IsoMZ_range[1])
+                one_scan_mz_in_range = one_scan_mz[
+                    (one_scan_mz > iso_mz_range[0]) & (one_scan_mz < iso_mz_range[1])
+                ]
+                one_scan_mz_in_range_idx = np.where(
+                    (one_scan_mz > iso_mz_range[0]) & (one_scan_mz < iso_mz_range[1])
                 )[0]
+
             else:
                 if not isinstance(mzrange, list):
                     raise TypeError(
                         "mzrange should be a list, or provide an int for precursor"
                         " index."
                     )
-                OneScanMZinRange = OneScanMZ[
-                    (OneScanMZ > mzrange[0]) & (OneScanMZ < mzrange[1])
+                one_scan_mz_in_range = one_scan_mz[
+                    (one_scan_mz > mzrange[0]) & (one_scan_mz < mzrange[1])
                 ]
-                OneScanMZinRangeIdx = np.where(
-                    (OneScanMZ > mzrange[0]) & (OneScanMZ < mzrange[1])
+                one_scan_mz_in_range_idx = np.where(
+                    (one_scan_mz > mzrange[0]) & (one_scan_mz < mzrange[1])
                 )[0]
 
             # Calculating values for visualization
-            Intensity = np.array(OneScan["intarray"])[OneScanMZinRangeIdx]
+            intensity = np.array(one_scan["intarray"])[one_scan_mz_in_range_idx]
             if log_intensity:  # +1 to avoid divide by zero error
-                Intensity = np.log10(Intensity + 1)
-            peak_results = ExtractPeak(x=OneScanMZinRange, y=Intensity)
+                intensity = np.log10(intensity + 1)
+            peak_results = ExtractPeak(x=one_scan_mz_in_range, y=intensity)
             peaks_idx = peak_results["apex_mzidx"]
             print("Peak results:")
             print(peak_results)
         case "infer":
             if infer_intensity is None:
                 raise ValueError("please provide infer_intensity.")
-            Intensity = infer_intensity.values
+            intensity = infer_intensity.values
             if log_intensity:
-                Intensity = np.log10(infer_intensity.values + 1)
+                intensity = np.log10(infer_intensity.values + 1)
             if precursor_idx is not None:
-                IsoMZ = Maxquant_result.loc[precursor_idx, "IsoMZ"]
-                IsoMZ_flatten = np.concatenate(IsoMZ.values).ravel()
-                IsoMZ_range = [np.min(IsoMZ_flatten) - 1, np.max(IsoMZ_flatten) + 1]
-                InferinRange = Intensity[
-                    (infer_intensity.index > IsoMZ_range[0])
-                    & (infer_intensity.index < IsoMZ_range[1])
+                iso_mz = maxquant_result.loc[precursor_idx, "IsoMZ"]
+                iso_mz_flatten = np.concatenate(iso_mz.values).ravel()
+                iso_mz_range = [np.min(iso_mz_flatten) - 1, np.max(iso_mz_flatten) + 1]
+                infer_in_range = intensity[
+                    (infer_intensity.index > iso_mz_range[0])
+                    & (infer_intensity.index < iso_mz_range[1])
                 ]
-                InferinRangeIdx = infer_intensity.index[
-                    (infer_intensity.index > IsoMZ_range[0])
-                    & (infer_intensity.index < IsoMZ_range[1])
+                infer_in_range_idx = infer_intensity.index[
+                    (infer_intensity.index > iso_mz_range[0])
+                    & (infer_intensity.index < iso_mz_range[1])
                 ]
 
     # Plot
     fig, axs = plt.subplots(2, 1, sharex=True, sharey=False)
     fig.subplots_adjust(hspace=0)
     if precursor_idx is not None:
-        colormap = plt.cm.bwr  # nipy_spectral, Set1,Paired
+        colormap = colormaps["bwr"]  # nipy_spectral, Set1,Paired
         colors = [colormap(i) for i in np.linspace(0, 1, len(precursor_idx))]
         for i, precursor in enumerate(precursor_idx):
             axs[0].vlines(
-                x=Maxquant_result.loc[precursor, "IsoMZ"],
+                x=maxquant_result.loc[precursor, "IsoMZ"],
                 ymin=0,
-                ymax=Maxquant_result.loc[precursor, "IsoAbundance"],
+                ymax=maxquant_result.loc[precursor, "IsoAbundance"],
                 label=precursor,
                 color=colors[i],
             )
             print(
                 "Isotope Pattern:",
                 precursor,
-                Maxquant_result.loc[precursor, "IsoMZ"],
-                Maxquant_result.loc[precursor, "IsoAbundance"],
+                maxquant_result.loc[precursor, "IsoMZ"],
+                maxquant_result.loc[precursor, "IsoAbundance"],
             )
         axs[0].set_title("Up: Isotope Pattern, Down: MS1 Scan " + str(scan_idx))
+        if mzrange is not None:
+            axs[0].set_xlim(mzrange)
     match lower_plot:
         case "obs":
-            axs[1].vlines(x=OneScanMZinRange, ymin=-Intensity, ymax=0, label="MS peaks")
+            axs[1].vlines(
+                x=one_scan_mz_in_range, ymin=-intensity, ymax=0, label="MS peaks"
+            )
             axs[1].hlines(
                 y=-peak_results["peak_height"],
                 xmin=peak_results["start_mz"],
@@ -474,30 +490,32 @@ def plot_isopattern_and_obs(
                 color="black",
             )
             axs[1].vlines(
-                x=OneScanMZinRange[peaks_idx],
-                ymin=-Intensity[peaks_idx],
+                x=one_scan_mz_in_range[peaks_idx],
+                ymin=-intensity[peaks_idx],
                 ymax=0,
                 color="orange",
                 label="inferred apex",
             )
             axs[1].plot(
-                OneScanMZinRange[peaks_idx],
-                -Intensity[peaks_idx],
+                one_scan_mz_in_range[peaks_idx],
+                -intensity[peaks_idx],
                 "x",
                 color="orange",
                 label="inferred apex",
             )
+            if mzrange is not None:
+                axs[1].set_xlim(mzrange)
         case "infer":
             Logger.debug(
-                "infer m/z and intensities: %s, %s", InferinRangeIdx, InferinRange
+                "infer m/z and intensities: %s, %s", infer_in_range_idx, infer_in_range
             )
             axs[1].vlines(  # x = infer_intensity.index,
-                x=InferinRangeIdx,
-                ymin=-InferinRange,
+                x=infer_in_range_idx,
+                ymin=-infer_in_range,
                 ymax=0,
                 label="inferred intensity",
             )
-            axs[1].set_xlim(IsoMZ_range)
+            axs[1].set_xlim(iso_mz_range)
     fig.legend(loc="center right", bbox_to_anchor=(1.15, 0.5))
 
     # save result
@@ -655,7 +673,7 @@ def plot_activation(
             save_dir=save_dir,
             fig_type_name="Activation",
             fig_spec_name=title.replace("|", "_"),
-            format=save_format,
+            fig_format=save_format,
             bbox_inches="tight",
         )
 

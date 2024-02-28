@@ -1,11 +1,10 @@
 import logging
-
-Logger = logging.getLogger(__name__)
 from typing import Literal, Union
 
-import matplotlib.pyplot as plt
 import numpy as np
 from scipy.optimize import minimize
+
+Logger = logging.getLogger(__name__)
 
 
 class CustomLinearModel:
@@ -58,15 +57,15 @@ class CustomLinearModel:
                 )
 
     def fit(self, maxiter=250, method: str = "TNC"):
-        if type(self.beta_init) == type(None):
+        if self.beta_init is None:
             self.beta_init = np.array([1] * self.X.shape[1])  # default init: beta = 1
         else:
             pass
 
-        if self.beta != None and all(self.beta_init == self.beta):
+        if self.beta is not None and all(self.beta_init == self.beta):
             Logger.info("Model already fit once; continuing fit with more itrations.")
 
-        option_key = "maxfun" if method == "TNC" else "maxiter"
+        # option_key = "maxfun" if method == "TNC" else "maxiter"
         res = minimize(
             self.total_loss,
             self.beta_init,
@@ -84,7 +83,7 @@ def mean_square_root_error(y_pred, y_true, sample_weights=None):
     y_true_sqrt = y_true
     y_pred_sqrt = y_pred
     assert len(y_true_sqrt) == len(y_pred_sqrt)
-    if type(sample_weights) == type(None):
+    if sample_weights is None:
         return np.mean(np.square(y_true_sqrt - y_pred_sqrt))
     else:
         sample_weights = np.array(sample_weights)

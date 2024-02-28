@@ -80,7 +80,11 @@ def load_mzml(msconvert_file: str):
 
     :msconvert_file: filepath to mzml
     """
-    if msconvert_file.endswith(".mzML"):
+    if msconvert_file.endswith(".pkl"):
+        msconvert_file_base = msconvert_file[:-3]
+        Logger.info("Reading pickle file")
+        df_ms1 = pd.read_pickle(msconvert_file)
+    elif msconvert_file.endswith(".mzML"):
         msconvert_file_base = msconvert_file[:-4]
         Logger.info("Reading mzML file")
         ind, mslev, bpmz, bpint, starttime, mzarray, intarray = (
@@ -114,10 +118,7 @@ def load_mzml(msconvert_file: str):
         )
         Logger.info("Saving data to pickle file")
         df_ms1.to_pickle(msconvert_file[:-5] + ".pkl")
-    elif msconvert_file.endswith(".pkl"):
-        msconvert_file_base = msconvert_file[:-4]
-        Logger.info("Reading pickle file")
-        df_ms1 = pd.read_pickle(msconvert_file)
+
     else:
         raise ValueError("File format not supported")
     if not os.path.isfile(msconvert_file_base + "_MS1Scans_NoArray.csv"):
@@ -160,3 +161,24 @@ def load_sparse_csr(filename):
     return csr_matrix(
         (loader["data"], loader["indices"], loader["indptr"]), shape=loader["shape"]
     )
+
+
+def jaccard_similarity_from_peak_results(row) -> float:
+    seq1 = range(row[["start_scan", "end_scan"]][0], row[["start_scan", "end_scan"]][1])
+    seq2 = range(
+        row[
+            [
+                "Calibrated retention time start_scan",
+                "Calibrated retention time finish_scan",
+            ]
+        ][0],
+        row[
+            [
+                "Calibrated retention time start_scan",
+                "Calibrated retention time finish_scan",
+            ]
+        ][1],
+    )
+    intersection = len(set(seq1).intersection(set(seq2)))
+    union = len(set(seq1).union(set(seq2)))
+    return intersection / union

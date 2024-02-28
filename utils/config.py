@@ -2,6 +2,7 @@
 import json
 import logging
 import os
+from pathlib import Path
 import pickle
 from typing import Literal
 
@@ -9,8 +10,8 @@ Logger = logging.getLogger(__name__)
 
 _alpha_opt_metric = Literal["cos_dist", "RMSE"]
 _loss = Literal["lasso", "sqrt_lasso"]
-_algo = ["lasso_lars", "lasso_cd", "lars", "omp", "threshold"]
-_alpha_criteria = ["min", "convergence"]
+_algo = Literal["lasso_lars", "lasso_cd", "lars", "omp", "threshold"]
+_alpha_criteria = Literal["min", "convergence"]
 _pp_method = Literal["raw", "sqrt"]
 _AlignMethods = Literal["2stepNN", "peakRange"]
 
@@ -81,7 +82,7 @@ class Config:
         """Get filename from config file."""
         self.data["filename"] = (
             self.notes
-            + self.basename[:-5]
+            + self.basename
             + "_ScanByScan"
             + "_RTtol"
             + str(self.rt_tol)
@@ -120,15 +121,13 @@ class Config:
     @property
     def basename(self) -> str:
         """Get basename from config file."""
-        self.data["basename"] = os.path.basename(self.data["mzml_path"])
+        self.data["basename"] = Path(os.path.basename(self.data["mzml_path"])).stem
         return self.data.get("basename")
 
     @property
     def ms1scans_no_array_name(self) -> str:
         """Get ms1scans_no_array_name from config file."""
-        self.data["ms1scans_no_array_name"] = (
-            self.basename[:-5] + "_MS1Scans_NoArray.csv"
-        )
+        self.data["ms1scans_no_array_name"] = self.basename + "_MS1Scans_NoArray.csv"
         return self.data.get("ms1scans_no_array_name")
 
     @property
@@ -167,14 +166,7 @@ class Config:
 
     def check_config(self):
         """Check config file validation."""
-        if self.data["opt_algo"] not in _algo:
-            raise AssertionError(
-                f"Invalid optimization algorithm, should be one of: {_algo}"
-            )
-        if self.data["alpha_criteria"] not in _alpha_criteria:
-            raise AssertionError(
-                f"Invalid alpha criteria, should be one of: {_alpha_criteria}"
-            )
+        pass
 
     def make_result_dirs(self):
         """Make result directory from config."""

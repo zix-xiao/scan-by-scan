@@ -14,7 +14,7 @@ from psm_utils.io.peptide_record import to_dataframe
 from utils.metrics import RT_metrics
 
 
-from optimization.dictionary import CalcModpeptIsopattern
+from optimization.dictionary import calculate_modpept_isopattern
 
 
 def generate_reference(
@@ -157,7 +157,7 @@ def generate_reference(
 
     pred_filtered["IsoMZ"], pred_filtered["IsoAbundance"] = zip(
         *pred_filtered.apply(
-            lambda row: CalcModpeptIsopattern(
+            lambda row: calculate_modpept_isopattern(
                 modpept=row["Modified sequence"], charge=row["Charge"], ab_thres=0.01
             ),
             axis=1,
