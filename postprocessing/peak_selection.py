@@ -1,3 +1,4 @@
+from curses import meta
 import logging
 from typing import Literal, List
 
@@ -28,6 +29,17 @@ from sklearn.preprocessing import (
 import math
 from utils.tools import match_time_to_scan
 from utils.plot import plot_pie, save_plot
+from keras.models import Model
+from keras.layers import (
+    Input,
+    Masking,
+    Conv1D,
+    Dense,
+    Dropout,
+    GlobalAveragePooling1D,
+    concatenate,
+)
+from keras import regularizers
 
 
 Logger = logging.getLogger(__name__)
@@ -421,12 +433,13 @@ def _pad_seq_two_side(peak, maxlen, value):
 
 def split_data(
     seq: np.ndarray,
-    label: np.ndarray,
+    # label: np.ndarray,
+    # metadata: np.ndarray | None = None,
     precursor_id: np.ndarray | None = None,
     test_ratio: float = 0.2,
     val_ratio: float = 0.2,
     random_seed: int | None = None,
-) -> (np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray):
+):
     """Split the data into training and testing sets.
     :param seq: Input sequences.
     :param label: Labels.
@@ -471,25 +484,14 @@ def split_data(
                     len(indices) * (train_ratio + val_ratio)
                 )
             ]
-    seq_train = seq[train_indices]
-    seq_test = seq[test_indices]
-    label_train = label[train_indices]
-    label_test = label[test_indices]
+
     if val_ratio > 0:
-        seq_val = seq[val_indices]
-        label_val = label[val_indices]
         return (
-            seq_train,
-            seq_val,
-            seq_test,
-            label_train,
-            label_val,
-            label_test,
             train_indices,
             val_indices,
             test_indices,
         )
-    return seq_train, seq_test, label_train, label_test, train_indices, test_indices
+    return train_indices, test_indices
 
 
 def evaluate_class_distribution(label: np.ndarray):
@@ -506,7 +508,8 @@ def evaluate_class_distribution(label: np.ndarray):
     weight_for_0 = (1 / neg) * (total / 2.0)
     weight_for_1 = (1 / pos) * (total / 2.0)
     class_weight = {0: weight_for_0, 1: 1 / weight_for_1}
-    return inital_bias, class_weight
+    initial_distr = np.array([1 - (pos / total), pos / total])
+    return inital_bias, class_weight, initial_distr
 
 
 # TODO: the following resampling leads to val performance always classifying 0
@@ -635,6 +638,105 @@ def make_cnn_model(config: dict, output_bias=None):
     return model
 
 
+def make_conv1d_encoder(config: dict):
+    peak_seq_input = Input(
+        shape=(config["peak_seq_maxlen"], config["peak_seq_features"]),
+        name="peak_seq",
+    )
+    peak_seq_features = Masking(mask_value=-1)(peak_seq_input)
+    peak_seq_features = Conv1D(
+        filters=config["conv1_n_filters"],
+        kernel_size=config["conv1_kernel_size"],
+        activation="relu",
+    )(peak_seq_features)
+    peak_seq_features = Conv1D(
+        filters=config["conv2_n_filters"],
+        kernel_size=config["conv2_kernel_size"],
+        activation="relu",
+    )(peak_seq_features)
+    peak_seq_features = Conv1D(
+        filters=config["conv3_n_filters"],
+        kernel_size=config["conv3_kernel_size"],
+        activation="relu",
+    )(peak_seq_features)
+    conv1d_output = GlobalAveragePooling1D()(peak_seq_features)
+    # conv1d_block = Model(inputs=inputs, outputs=conv1d_output)
+    return conv1d_output
+
+
+def make_dense_classifier(config: dict, output_bias=None):
+    metadata_input = Input(shape=config["metadata_input_shape"], name="metadata")
+    peak_seq_input = Input(
+        shape=(config["peak_seq_maxlen"], config["peak_seq_features"]),
+        name="peak_seq",
+    )
+    peak_seq_features = Masking(mask_value=-1)(peak_seq_input)
+    peak_seq_features = Conv1D(
+        filters=config["conv1_n_filters"],
+        kernel_size=config["conv1_kernel_size"],
+        activation="relu",
+    )(peak_seq_features)
+    peak_seq_features = Conv1D(
+        filters=config["conv2_n_filters"],
+        kernel_size=config["conv2_kernel_size"],
+        activation="relu",
+    )(peak_seq_features)
+    peak_seq_features = Conv1D(
+        filters=config["conv3_n_filters"],
+        kernel_size=config["conv3_kernel_size"],
+        activation="relu",
+    )(peak_seq_features)
+    conv1d_output = GlobalAveragePooling1D()(peak_seq_features)
+
+    x = concatenate([conv1d_output, metadata_input])
+    x = Dense(
+        config["dense1_n_units"],
+        kernel_regularizer=regularizers.l2(config["dense1_reg_rate"]),
+        activation="relu",
+        name="dense_1",
+    )(x)
+    x = Dense(
+        config["dense2_n_units"],
+        kernel_regularizer=regularizers.l2(config["dense2_reg_rate"]),
+        activation="relu",
+        name="dense_2",
+    )(x)
+    x = Dense(
+        config["dense3_n_units"],
+        kernel_regularizer=regularizers.l2(config["dense3_reg_rate"]),
+        activation="relu",
+        name="dense_3",
+    )(x)
+    x = Dropout(config["dropout_rate"], name="dropout_1")(x)
+    output = Dense(
+        1, activation="sigmoid", name="dense_prediction", bias_initializer=output_bias
+    )(x)
+
+    model = Model(inputs=[peak_seq_input, metadata_input], outputs=output)
+    # model.compile(
+    #     optimizer=Adam(learning_rate=config["learning_rate"]),
+    #     loss=BinaryCrossentropy(),
+    #     metrics=METRICS,
+    # )
+    return model
+
+
+def make_multi_input_model(config: dict, output_bias=None):
+    """Make the multi input model."""
+    if output_bias is not None:
+        Logger.info("Output bias using : %s", output_bias)
+        output_bias = tf.keras.initializers.Constant(output_bias)
+
+    multi_input_model = make_dense_classifier(config, output_bias=output_bias)
+
+    multi_input_model.compile(
+        optimizer=Adam(learning_rate=config["learning_rate"]),
+        loss=BinaryCrossentropy(),
+        metrics=METRICS,
+    )
+    return multi_input_model
+
+
 def model_tuner(hp, maxlen: int = 361, initial_bias: List[float] | None = -1.04778782):
     model = Sequential()
     model.add(Masking(mask_value=-1))  # Masking layer with the padding marker
@@ -738,7 +840,12 @@ def plot_pred_distr(
 
 def evaluate_id_based_cls(df_test: pd.DataFrame, top_n: int = 1):
     """Evaluate the classification accuracy based on highest scored peak per precursor_id."""
-    df_test_filtered = get_top_n_scored_peaks_by_precursor(df_test, top_n)
+    # In df_test, only consider precursor with true peak labblled
+    grouped = df_test.groupby('precursor_id')['y_true'].sum()
+    no_groundtruth_ids = grouped[grouped == 0].index
+    print(f"Number of precursors without ground truth: {len(no_groundtruth_ids)}")
+    df_test_truepeaks = df_test[~df_test['precursor_id'].isin(no_groundtruth_ids)]
+    df_test_filtered = get_top_n_scored_peaks_by_precursor(df_test_truepeaks, top_n)
 
     # only keep the true peak of each precursor_id
     # df_test_filtered = df_test_filtered[df_test_filtered["y_true"] == 1]
@@ -785,6 +892,8 @@ def plot_activation_and_score(
     precursor_id: int,
     cos_dist: pd.DataFrame | None = None,
     save_dir: str | None = None,
+    log_int: bool = True,
+    show_pred_peak: bool = True,
 ):
     """Plot the activation and score for a precursor_id."""
     peak_results_filtered = peak_results[peak_results["id"] == precursor_id]
@@ -796,7 +905,7 @@ def plot_activation_and_score(
         left_index=True,
     )
 
-    fig, ax = plt.subplots(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=(8, 6))
     ax.plot(activation.loc[precursor_id])
     if cos_dist is not None:
         ax1 = ax.twinx()
@@ -836,18 +945,19 @@ def plot_activation_and_score(
     pred_peak = peak_results_score[
         peak_results_score["y_pred_prob"].max() == peak_results_score["y_pred_prob"]
     ]
-    ax.add_patch(
-        Rectangle(
-            (pred_peak["start_scan"].min(), y_min),
-            pred_peak["end_scan"].max() - pred_peak["start_scan"].min(),
-            y_max - y_min,
-            color="yellow",
-            alpha=1,
-            linewidth=2.5,
-            fill=False,
-            label="True Peak",
+    if show_pred_peak:
+        ax.add_patch(
+            Rectangle(
+                (pred_peak["start_scan"].min(), y_min),
+                pred_peak["end_scan"].max() - pred_peak["start_scan"].min(),
+                y_max - y_min,
+                color="yellow",
+                alpha=1,
+                linewidth=2.5,
+                fill=False,
+                label="True Peak",
+            )
         )
-    )
     ax.vlines(
         np.mean([true_peak["RT_search_left_scan"], true_peak["RT_search_right_scan"]]),
         y_min,
@@ -856,7 +966,10 @@ def plot_activation_and_score(
         linestyle="--",
         label="Predicted RT",
     )
-    ax.set_yscale("log")
+    if log_int:
+        ax.set_yscale("log")
+    ax.set_ylabel("Activation")
+    ax.set_xlabel("Scan Index")
     # ax.legend()
     plt.tight_layout()
     save_plot(
@@ -864,3 +977,15 @@ def plot_activation_and_score(
         fig_type_name="ActivationPeakCls",
         fig_spec_name=f"Activation_{precursor_id}",
     )
+
+def filter_and_aggregate_intensity(df, threshold=0.05, by_matched:bool=False):
+    if by_matched:
+        df["peak_intensity_auc"] = df.apply(
+            lambda row: row["peak_intensity_auc"] if row["matched"] else 0, axis=1
+        )
+    else:
+        df["peak_intensity_auc"] = df.apply(
+            lambda row: row["peak_intensity_auc"] if row["pred_score"] > threshold else 0, axis=1
+        )
+    result = df.groupby("id")["peak_intensity_auc"].sum().reset_index()
+    return result
