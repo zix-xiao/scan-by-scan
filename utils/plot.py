@@ -185,6 +185,8 @@ def plot_scatter(
         # Plot with correlation
         if contour:
             ax = sns.jointplot(x=x_log, y=y_log, kind="kde")
+            ax.ax_marg_x.remove()
+            ax.ax_marg_y.remove()
             fig_type_name = "CorrQuantificationDensity"
         else:
             ax = sns.regplot(x=x_log, y=y_log, scatter=False, fit_reg=True)
