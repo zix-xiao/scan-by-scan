@@ -11,15 +11,11 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 for_train_filepath_list = [
-    "/mnt/cmnfs/proj/ORIGINS/data/ecoli/ss/DDA/MQ/combined/txt/evidence_1.txt",
-    "/mnt/cmnfs/proj/ORIGINS/data/ecoli/ss/DDA/MQ/combined/txt/evidence_2.txt",
-    "/mnt/cmnfs/proj/ORIGINS/data/ecoli/ss/DDA/MQ/combined/txt/evidence_3.txt",
-    "/mnt/cmnfs/proj/ORIGINS/data/ecoli/ss/DDA/MQ/combined/txt/evidence_4.txt",
-    "/mnt/cmnfs/proj/ORIGINS/data/ecoli/ss/DDA/MQ/combined/txt/evidence_5.txt",
+    "/mnt/cmnfs/proj/ORIGINS/data/brain/txt_ssDDA_LFQ_noMBR/evidence_fresh1.txt",
+    "/mnt/cmnfs/proj/ORIGINS/data/brain/txt_ssDDA_LFQ_noMBR/evidence_fresh2.txt",
+    "/mnt/cmnfs/proj/ORIGINS/data/brain/txt_ssDDA_LFQ_noMBR/evidence_fresh3.txt",
 ]
-to_pred_filepath = (
-    "/mnt/cmnfs/proj/ORIGINS/data/ecoli/HpHRP/MQ/100FDR_PSM/combined/txt/evidence.txt"
-)
+to_pred_filepath = "/mnt/cmnfs/proj/ORIGINS/data/brain/txt_3x13Brainregions_MBR_LFQ_iBAQ/evidence_freshfrozen_modseq_charge.txt"
 
 for for_train_filepath in for_train_filepath_list:
     train_file_name = os.path.basename(for_train_filepath[:-4])

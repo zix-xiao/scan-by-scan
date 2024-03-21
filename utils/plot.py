@@ -693,3 +693,88 @@ def plot_activation(
         )
         plt.xlabel("Scan index")
     return activation_in_range_df
+
+
+def plot_im_mz(
+    sliced_frame: pd.DataFrame, labels: np.ndarray = None, label_name: str = "Label"
+):
+    fig, ax = plt.subplots()
+    if labels is None:
+        labels = sliced_frame["intensity_values"]
+        label_name = "Intensity"
+    scatter = ax.scatter(
+        sliced_frame["mobility_values"], sliced_frame["mz_values"], c=labels, s=0.5
+    )
+    cbar = plt.colorbar(scatter)
+    cbar.set_label(label_name, rotation=270)
+    ax.set_ylabel("m/z")
+    ax.set_xlabel("mobility")
+
+    plt.title("Ion mobility spectrum frame " + str(sliced_frame["frame_indices"].min()))
+
+    plt.show()
+
+
+def plot_im_mz_int(sliced_frame: pd.DataFrame):
+    fig, ax = plt.subplots(subplot_kw=dict(projection="3d"))
+    ax.stem(
+        sliced_frame["mobility_values"].values,
+        sliced_frame["mz_values"].values,
+        sliced_frame["intensity_values"].values,
+    )
+    ax.set_ylabel("m/z")
+    ax.set_xlabel("mobility")
+    ax.set_zlabel("intensity")
+
+
+def plot_im_or_mz_int(
+    sliced_frame: pd.DataFrame,
+    mz_value: float = None,
+    im_value: float = None,
+    labels: np.ndarray = None,
+    label_name="Label",
+):
+    assert (
+        mz_value is not None or im_value is not None
+    ), "Please provide either mz_value or im_value"
+    if mz_value is not None:
+        sliced_frame_filtered = sliced_frame.loc[sliced_frame["mz_values"] == mz_value]
+        x_value = "mobility_values"
+        title = (
+            "Ion mobility spectrum frame "
+            + str(sliced_frame["frame_indices"].min())
+            + "m/z "
+            + str(mz_value)
+        )
+    else:
+        x_value = "mz_values"
+        sliced_frame_filtered = sliced_frame.loc[
+            sliced_frame["mobility_values"] == im_value
+        ]
+        title = (
+            "Ion mobility spectrum frame "
+            + str(sliced_frame["frame_indices"].min())
+            + " im "
+            + str(im_value)
+        )
+    fig, ax = plt.subplots()
+    if labels is not None:
+        scatter = ax.scatter(
+            sliced_frame_filtered[x_value],
+            sliced_frame_filtered["intensity_values"],
+            c=labels,
+            s=0.5,
+        )
+        cbar = plt.colorbar(scatter)
+        cbar.set_label(label_name, rotation=270)
+    else:
+        scatter = ax.scatter(
+            sliced_frame_filtered[x_value],
+            sliced_frame_filtered["intensity_values"],
+            s=10,
+        )
+    ax.set_ylabel("intensity")
+    ax.set_xlabel(x_value)
+    plt.title(title)
+
+    plt.show()
