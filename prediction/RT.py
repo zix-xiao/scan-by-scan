@@ -75,6 +75,7 @@ def generate_reference(
         ) = prepare_MQ_evidence(
             maxquant_evidence_filepath=to_pred_filepath, suffix=pred_suffix
         )
+        Logger.info("pred_evidence_transfer_file is %s", pred_evidence_tranfer_file)
         pred_MQ_peprec, pred_peprec_agg = format_MQ_as_DeepLCinput(
             pred_evidence_tranfer_file
         )
@@ -184,6 +185,8 @@ def prepare_MQ_evidence(
     )
     evidence = pd.read_csv(maxquant_evidence_filepath, sep="\t")
     evidence = evidence.rename(columns={"MS/MS scan number": "Scan number"})
+    # drop rows where Modified Sequence is NaN
+    evidence = evidence.dropna(subset=["Modified sequence"])
     evidence.to_csv(maxquant_file_transfer, index=False, sep="\t")
 
     return (
@@ -201,7 +204,8 @@ def format_MQ_as_DeepLCinput(maxquant_file_transfer: str):
 
     psm_list.add_fixed_modifications([("Carbamidomethyl", ["C"])])
     psm_list.apply_fixed_modifications()
-    psm_list.rename_modifications({"ox": "Oxidation", "ac": "Acetyl"})
+    # Modify these to match the modifications in the data and library of deepLC model
+    psm_list.rename_modifications({"ox": "Oxidation", "ac": "Acetyl", "Oxidation (M)": "Oxidation"})
     peprec = to_dataframe(psm_list)  # can be mapped to ori df
 
     # Only one RT for each (peptide seq, mod)

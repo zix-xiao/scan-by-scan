@@ -1,13 +1,12 @@
 import os
 import logging
 import time
-from unittest import result
 
 import fire
 import numpy as np
 import pandas as pd
 
-from postprocessing.post_processing import calculate_sum_activation_array
+from postprocessing.post_processing import select_peak_from_activation
 from result_analysis.result_analysis import SBSResult
 
 
@@ -38,10 +37,10 @@ def extract_peaks_and_analyze(
     )
 
     if return_peak_result:
-        sum_peak, peak_results = calculate_sum_activation_array(
-            Maxquant_result=Maxquant_result_dict,  # 100 rows for testing
+        sum_peak, peak_results = select_peak_from_activation(
+            maxquant_result_ref=Maxquant_result_dict,  # 100 rows for testing
             activation=activation,
-            MS1ScansNoArray=MS1Scans_NoArray,
+            ms1scans_no_array=MS1Scans_NoArray,
             ref_RT_apex=ref_RT_apex,
             ref_RT_start=ref_RT_start,
             ref_RT_end=ref_RT_end,
@@ -57,10 +56,10 @@ def extract_peaks_and_analyze(
             index=False,
         )
     else:
-        sum_peak = calculate_sum_activation_array(
-            Maxquant_result=Maxquant_result_dict,
+        sum_peak = select_peak_from_activation(
+            maxquant_result_ref=Maxquant_result_dict,
             activation=activation,
-            MS1ScansNoArray=MS1Scans_NoArray,
+            ms1scans_no_array=MS1Scans_NoArray,
             ref_RT_apex=ref_RT_apex,
             ref_RT_start=ref_RT_start,
             ref_RT_end=ref_RT_end,
@@ -77,7 +76,7 @@ def extract_peaks_and_analyze(
     SBS_result = SBSResult(
         ref_df=Maxquant_result_dict,
         exp_df=Maxquant_result_exp,
-        RT_tol=1.0,
+        rt_tol=1.0,
         sum_peak=sum_peak,
     )
     SBS_result.plot_intensity_corr(
