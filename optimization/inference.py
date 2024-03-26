@@ -35,20 +35,34 @@ class Quant:
 
     def __init__(
         self,
-        CandidateDict: pd.DataFrame,
+        candidate_dict: pd.DataFrame,
         obs_data: pd.DataFrame,
-        filteredPrecursorIdx: Union[np.ndarray, list],
+        filtered_precursor_idx: Union[np.ndarray, list],
         preprocessing_method: _pp_method,
     ) -> None:
-        self.filteredPrecursorIdx = filteredPrecursorIdx
+        """
+        Initialize the Inference class.
+
+        :param candidate_dict: DataFrame containing candidate dictionary.
+        :type candidate_dict: pd.DataFrame
+        :param obs_data: DataFrame containing observed data. contains mzarray_obs and intensity.
+        :type obs_data: pd.DataFrame
+        :param filtered_precursor_idx: Filtered precursor indices.
+        :type filtered_precursor_idx: Union[np.ndarray, list]
+        :param preprocessing_method: Preprocessing method to be used.
+        :type preprocessing_method: _pp_method
+
+        :return: None
+        """
+        self.filter_precursor_idx = filtered_precursor_idx
         self.obs_data_raw = self.obs_data = obs_data[["intensity"]].values
         self.obs_mz = obs_data[["mzarray_obs"]].values[:, 0]
         Logger.debug("obs mz (index) dimension: %s", self.obs_mz.shape)
         if preprocessing_method == "raw":
-            self.dictionary = CandidateDict[filteredPrecursorIdx].values
+            self.dictionary = candidate_dict[filtered_precursor_idx].values
             self.obs_data = obs_data[["intensity"]].values  # shape (n_mzvalues, 1)
         elif preprocessing_method == "sqrt":
-            self.dictionary = np.sqrt(CandidateDict[filteredPrecursorIdx].values)
+            self.dictionary = np.sqrt(candidate_dict[filtered_precursor_idx].values)
             self.obs_data = np.sqrt(
                 obs_data[["intensity"]].values
             )  # shape (n_mzvalues, 1)
@@ -58,6 +72,14 @@ class Quant:
         self.inferences = []
         self.nonzeros = []
         self.metric = []
+        self.infer = None
+        self.best_alpha = None
+        self.act = None
+        self.confusion_matrix = None
+        self.metric_used = None
+        self.id_result = None
+        self.cls_report = None
+        self.reconstruc_cos_dist = None
 
     def optimize(
         self,
@@ -249,16 +271,16 @@ class Quant:
             alpha = self.best_alpha
 
         result_idx = self.alphas.index(alpha)
-        inferIDidx = self.filteredPrecursorIdx[self.acts[result_idx] > 1]
+        inferIDidx = self.filter_precursor_idx[self.acts[result_idx] > 1]
         Logger.info("Number of non-zero actiavation = %s", len(inferIDidx))
-        y_pred = [element in set(inferIDidx) for element in self.filteredPrecursorIdx]
-        y_true = [element in set(trueIDidx) for element in self.filteredPrecursorIdx]
+        y_pred = [element in set(inferIDidx) for element in self.filter_precursor_idx]
+        y_true = [element in set(trueIDidx) for element in self.filter_precursor_idx]
         self.confusion_matrix = confusion_matrix(
             y_true=y_true, y_pred=y_pred, normalize=None, labels=[True, False]
         )
-        self.IDresult = pd.DataFrame(
+        self.id_result = pd.DataFrame(
             {
-                "Candidate": self.filteredPrecursorIdx,
+                "Candidate": self.filter_precursor_idx,
                 "Activation": self.acts[result_idx] > 1,
                 "y_pred": y_pred,
                 "y_true": y_true,
@@ -335,6 +357,7 @@ def process_one_scan(
     scan_idx: int,
     OneScan: pd.core.series.Series,
     Maxquant_result: pd.DataFrame,
+    scan_time: Union[float, None] = None,
     AbundanceMissingThres: float = 0.4,
     metric: _alpha_opt_metric = "cos_dist",
     alpha_criteria: _alpha_criteria = "convergence",
@@ -359,10 +382,11 @@ def process_one_scan(
     :
     """
     Logger.debug("Start.")
-
+    if scan_time is None:
+        scan_time = OneScan["starttime"]
     CandidatePrecursorsByRT = Maxquant_result.loc[
-        (Maxquant_result["RT_search_left"] <= OneScan["starttime"])
-        & (Maxquant_result["RT_search_right"] >= OneScan["starttime"])
+        (Maxquant_result["RT_search_left"] <= scan_time)
+        & (Maxquant_result["RT_search_right"] >= scan_time)
     ]
     Logger.debug("Filter by RT.")
 
@@ -378,18 +402,18 @@ def process_one_scan(
             y_true = ScanDict.obs_peak_int
 
             ScanDict.get_feature_corr(
-                corr_thres=corr_thres,
+                cos_sim_thres=corr_thres,
                 calc_jaccard_sim=False,
-                plot_collinear_hist=False,
-                plot_hmap=False,
+                # plot_collinear_hist=False,
+                # plot_hmap=False,
             )
             num_corr_dict_candidate = ScanDict.high_corr_sol.shape[0]
             Logger.debug("Construct dictionary")
 
             PrecursorQuant = Quant(
-                CandidateDict=CandidateDict,
+                candidate_dict=CandidateDict,
                 obs_data=y_true,
-                filteredPrecursorIdx=filteredPrecursorIdx,
+                filtered_precursor_idx=filteredPrecursorIdx,
                 preprocessing_method=preprocessing_method,
             )
 
@@ -426,7 +450,7 @@ def process_one_scan(
             rmse = PrecursorQuant.CalcRMSE()
             scan_sum = (
                 scan_idx,
-                OneScan["starttime"],
+                scan_time,
                 CandidatePrecursorsByRT.index,
                 filteredPrecursorIdx,
                 num_corr_dict_candidate,
@@ -447,7 +471,7 @@ def process_one_scan(
             collinear_candidates = None
             scan_sum = (
                 scan_idx,
-                OneScan["starttime"],
+                scan_time,
                 CandidatePrecursorsByRT.index,
                 filteredPrecursorIdx,
                 np.nan,
@@ -468,7 +492,7 @@ def process_one_scan(
         collinear_candidates = None
         scan_sum = (
             scan_idx,
-            OneScan["starttime"],
+            scan_time,
             [],
             [],
             np.nan,

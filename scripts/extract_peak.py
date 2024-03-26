@@ -74,9 +74,8 @@ def extract_peaks_and_analyze(
     logging.info("Script execution time: {}m {}s".format(int(minutes), int(seconds)))
 
     SBS_result = SBSResult(
-        ref_df=Maxquant_result_dict,
-        exp_df=Maxquant_result_exp,
-        rt_tol=1.0,
+        maxquant_ref_df=Maxquant_result_dict,
+        maxquant_exp_df=Maxquant_result_exp,
         sum_peak=sum_peak,
     )
     SBS_result.plot_intensity_corr(

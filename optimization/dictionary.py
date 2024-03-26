@@ -2,10 +2,10 @@ import logging
 from typing import Union
 import numpy as np
 import pandas as pd
-
+from scipy import sparse
 import IsoSpecPy as iso
 import matplotlib.pyplot as plt
-from sklearn.metrics import jaccard_score
+import sklearn.preprocessing as pp
 import networkx as nx
 
 from utils.plot import plot_comparison
@@ -57,6 +57,30 @@ def calculate_modpept_isopattern(
     probs_sort_by_mass = iso_distr.np_probs()
 
     return mz_sort_by_mass, probs_sort_by_mass
+
+
+def csr_cosine_similarities(csrmat, normalize=True):
+    if normalize:
+        csrmat = pp.normalize(csrmat.tocsc(), axis=0)
+    return csrmat.T * csrmat
+
+
+def csr_jaccard_similarities(csrmat):
+    csrmat.data[:] = 1  # binarize the matrix
+    cols_sum = csrmat.getnnz(
+        axis=0
+    )  # getnnz: Number of stored values, including explicit zeros in each column
+    set_ab = csrmat.T * csrmat
+
+    # for rows
+    set_a = np.repeat(cols_sum, set_ab.getnnz(axis=0))
+    # for columns
+    set_b = cols_sum[set_ab.indices]
+
+    jaccard_similarities = set_ab.copy()
+    jaccard_similarities.data /= set_a + set_b - set_ab.data
+
+    return jaccard_similarities
 
 
 def _connect_collinear_candidate_pairs(collinear_pairs: pd.Series):
@@ -111,7 +135,7 @@ class Dict:
         self.obs_peak_int = None
         self.match_candidate_with_peak()
 
-        self.corr_matrix = None
+        self.cos_sim_matrix = None
         self.high_corr_sol = None
         self.collinear_precursors = None
         self.collinear_sets = None
@@ -188,6 +212,17 @@ class Dict:
                     axis=0
                 )  # append mz for accumulated not observed iso abundance
                 self.dict = self.dict.fillna(0)
+
+                # drop mz values with no match in the candidates
+                self.dict = self.dict.loc[~(self.dict == 0).all(axis=1)]
+                self.peak_results = self.peak_results.loc[
+                    self.peak_results["apex_mz"].isin(self.dict.index)
+                ]
+                Logger.debug(
+                    "Number of peaks after filtering %s", self.peak_results.shape
+                )
+                Logger.debug("Number of mz in dict %s", self.dict.shape)
+                # assert self.dict.shape[0] == self.peak_results.shape[0]
                 Logger.debug(
                     "[Double check] Number of candidates by RT and abundance filter %s",
                     len(self.dict.columns.values),
@@ -208,38 +243,54 @@ class Dict:
 
     def get_feature_corr(
         self,
-        corr_thres: float = 0.9,
+        cos_sim_thres: float = 0.9,
+        jaccard_sim_thres: float = 0.5,
         calc_jaccard_sim: bool = True,
-        plot_hmap: bool = False,
-        plot_collinear_hist: bool = False,
+        calc_cos_sim: bool = True,
     ):
-        self.corr_matrix = self.dict.corr()
-        if plot_hmap:
-            self.corr_matrix.style.background_gradient(cmap="coolwarm")
-            plt.matshow(self.corr_matrix)
-            plt.show()
-        sol = self.corr_matrix.where(
-            np.triu(np.ones(self.corr_matrix.shape), k=1).astype(bool)
-        ).stack()
-        self.high_corr_sol = sol[sol >= corr_thres]  # type: ignore
-        if calc_jaccard_sim:
-            jaccard_sim = []
-            for pairs, _ in self.high_corr_sol.items():
-                jaccard_sim.append(
-                    jaccard_score(
-                        self.dict.loc[:, pairs[0]] > 0,
-                        self.dict.loc[:, pairs[1]] > 0,
-                        average="binary",
-                    )
-                )
-            self.high_corr_sol = pd.DataFrame(
-                {"Pearson R": self.high_corr_sol, "Jaccard Similarity": jaccard_sim}
+        assert (
+            calc_cos_sim or calc_jaccard_sim
+        ), "At least one similarity measure is required."
+
+        dict_csr = sparse.csr_matrix(self.dict.values)
+        # high_corr_sol = pd.DataFrame(
+        #     {"Cosine Similarity": [], "Jaccard Similarity": []}
+        # )
+        if calc_cos_sim:
+            # self.corr_matrix = self.dict.corr()
+            corr_csr = csr_cosine_similarities(dict_csr, normalize=True)
+            self.cos_sim_matrix = pd.DataFrame(
+                corr_csr.todense(), index=self.dict.columns, columns=self.dict.columns
             )
 
-        # self.collinear_sets_list = _connect_collinear_candidate_pairs(
-        #     self.high_corr_sol
-        # )
-        # Create a graph from the adjacency matrix
+            cos_sim = self.cos_sim_matrix.where(
+                np.triu(np.ones(self.cos_sim_matrix.shape), k=1).astype(bool)
+            ).stack()
+            # high_corr_sol["Cosine Similarity"] = cos_sim
+            high_corr_sol_cos = cos_sim[cos_sim >= cos_sim_thres]  # type: ignore
+            Logger.debug("Finished calculating cosine similarity.")
+
+        if calc_jaccard_sim:
+            jaccard_sim_csr = csr_jaccard_similarities(dict_csr)
+            self.jaccard_sim_matrix = pd.DataFrame(
+                jaccard_sim_csr.todense(),
+                index=self.dict.columns,
+                columns=self.dict.columns,
+            )
+            jaccard_sim = self.jaccard_sim_matrix.where(
+                np.triu(np.ones(self.jaccard_sim_matrix.shape), k=1).astype(bool)
+            ).stack()
+            # high_corr_sol["Jaccard Similarity"] = jaccard_sim
+            high_corr_sol_jaccard = jaccard_sim[jaccard_sim >= jaccard_sim_thres]  # type: ignore
+            Logger.debug("Finished calculating Jaccard similarity.")
+        if calc_cos_sim and calc_jaccard_sim:
+            self.high_corr_sol = pd.concat(
+                [high_corr_sol_cos, high_corr_sol_jaccard], axis=1
+            )
+        else:
+            self.high_corr_sol = (
+                high_corr_sol_cos if calc_cos_sim else high_corr_sol_jaccard
+            )
         graph = nx.from_edgelist(self.high_corr_sol.index)
 
         # Get the connected nodes
@@ -248,25 +299,28 @@ class Dict:
             self.high_corr_sol
         )
 
-        if plot_collinear_hist:
-            self.high_corr_sol.plot.hist()
-            ymin, ymax = plt.ylim()
-            plt.vlines(x=0.95, ymin=ymin, ymax=ymax, linestyles="dashed")
-            plt.vlines(x=0.9, ymin=ymin, ymax=ymax, linestyles="dashed")
-            plt.vlines(
-                x=corr_thres, ymin=ymin, ymax=ymax, linestyles="dashed", color="r"
-            )
-            plt.title("Distribution of Highly Correlation Coefficients")
-
-        Logger.info(
-            "Number of collinear sets: %s with correlation threshold %s",
-            len(self.collinear_sets),
-            corr_thres,
-        )
+        Logger.info("Number of collinear sets: %s ", len(self.collinear_sets))
         Logger.info(
             "Number of candidates involved in high correlation: %s",
             sum(len(s) for s in self.collinear_sets),
         )
+
+    def plot_feature_corr(
+        self, plot_hmap: bool = False, plot_collinear_hist: bool = False
+    ):
+        if plot_hmap:
+            self.cos_sim_matrix.style.background_gradient(cmap="coolwarm")
+            plt.matshow(self.cos_sim_matrix)
+            plt.show()
+        if plot_collinear_hist:
+            self.high_corr_sol["Cosine Similarity"].plot.hist()
+            ymin, ymax = plt.ylim()
+            plt.vlines(x=0.95, ymin=ymin, ymax=ymax, linestyles="dashed")
+            plt.vlines(x=0.9, ymin=ymin, ymax=ymax, linestyles="dashed")
+            plt.vlines(
+                x=0.5, ymin=ymin, ymax=ymax, linestyles="dashed", color="r"
+            )  # TODO: change x: threshold
+            plt.title("Distribution of Highly Correlation Coefficients")
 
     def plot_observe_iso_abundance(self):
         self.iso_abundance_by_id[self.iso_abundance_by_id["matched"]][
