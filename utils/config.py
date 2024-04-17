@@ -20,9 +20,29 @@ class Config:
     """Read config file and get information from it."""
 
     @property
+    def n_cpu(self) -> int:
+        """Get number of CPUs from config file."""
+        return self.data.get("n_cpu", 1)
+
+    @property
+    def n_batch(self) -> int:
+        """Get number of batches from config file."""
+        return self.data.get("n_batch", 1)
+
+    @property
+    def n_blocks_by_pept(self) -> int:
+        """ Ger number of blocks seperated by peptide when saving output """
+        return self.data.get("n_blocks_by_pept", 0)
+
+    @property
     def mzml_path(self) -> str:
         """Get mzml path from config file."""
         return self.data.get("mzml_path")
+
+    @property
+    def d_path(self) -> str:
+        """Get d path from config file."""
+        return self.data.get("d_path")
 
     @property
     def mq_exp_path(self) -> str:
@@ -38,6 +58,11 @@ class Config:
     def notes(self) -> str:
         """Get notes from config file."""
         return self.data.get("notes")
+
+    @property
+    def how_batch(self) -> Literal["robin_round", "block"]:
+        """Get method for generating batch from config file."""
+        return self.data.get("how_batch")
 
     @property
     def rt_tol(self) -> float:
@@ -78,10 +103,41 @@ class Config:
         return self.data.get("alphas", None)
 
     @property
+    def mz_bin_digits(self) -> int:
+        """Get mz bin digits from config file."""
+        return self.data.get("mz_bin_digits")
+
+    @property
+    def im_peak_extraction_width(self) -> int:
+        """Get peak extraction width from config file."""
+        return self.data.get("im_peak_width")
+
+    @property
+    def start_frame(self) -> int:
+        """Get start frame from config file."""
+        return self.data.get("start_frame")
+
+    @property
+    def end_frame(self) -> int:
+        """Get end frame from config file."""
+        return self.data.get("end_frame")
+
+    @property
     def filename(self) -> str:
         """Get filename from config file."""
+        if self.start_frame is not None and self.end_frame is not None:
+            notes = (
+                "frame"
+                + str(self.start_frame)
+                + "_"
+                + str(self.end_frame)
+                + "_"
+                + self.notes
+            )
+        else:
+            notes = self.notes
         self.data["filename"] = (
-            self.notes
+            notes
             + self.basename
             + "_ScanByScan"
             + "_RTtol"
@@ -95,9 +151,17 @@ class Config:
             + "_NoIntercept"
             + "_"
             + self.rt_ref
+            + "_mzBinDigits"
+            + str(self.mz_bin_digits)
+            + "_imPeakWidth"
+            + str(self.im_peak_extraction_width)
         )
         if self.peak_sel_cos_dist:
             self.data["filename"] += "_PScosDist"
+        if self.delta_mobility_thres:
+            self.data["filename"] += "_deltaMobilityThres" + str(
+                self.delta_mobility_thres
+            )
         return self.data.get("filename")
 
     @property
@@ -115,13 +179,19 @@ class Config:
     @property
     def dirname(self) -> str:
         """Get dirname from config file."""
-        self.data["dirname"] = os.path.dirname(self.data["mzml_path"])
+        try:
+            self.data["dirname"] = os.path.dirname(self.data["mzml_path"])
+        except KeyError as e:
+            self.data["dirname"] = os.path.dirname(self.data["d_path"])
         return self.data.get("dirname")
 
     @property
     def basename(self) -> str:
         """Get basename from config file."""
-        self.data["basename"] = Path(os.path.basename(self.data["mzml_path"])).stem
+        try:
+            self.data["basename"] = Path(os.path.basename(self.data["mzml_path"])).stem
+        except KeyError as e:
+            self.data["basename"] = Path(os.path.basename(self.data["d_path"])).stem
         return self.data.get("basename")
 
     @property
@@ -147,6 +217,11 @@ class Config:
             case "exp":
                 self.data["RT_ref_act_peak"] = "Calibrated retention time"
         return self.data.get("RT_ref_act_peak")
+
+    @property
+    def delta_mobility_thres(self) -> int:
+        """Get delta mobility threshold from config file."""
+        return self.data.get("delta_mobility_thres")
 
     ########################
     # functions start here #
