@@ -124,6 +124,8 @@ def plot_corr_int_ref_and_act(
     color: Union[None, pd.Series] = None,
     hover_data: Union[None, List] = None,
     save_dir: Union[None, str] = None,
+    log_x: bool = True,
+    log_y: bool = True,
 ):
     if hover_data is None:
         hover_data = [
@@ -135,8 +137,8 @@ def plot_corr_int_ref_and_act(
     reg_int, abs_residue, valid_idx = plot_scatter(
         x=ref_int,
         y=sum_act,
-        log_x=True,
-        log_y=True,
+        log_x=log_x,
+        log_y=log_y,
         data=data,
         filter_thres=filter_thres,
         contour=contour,
@@ -227,6 +229,7 @@ class SBSResult:
         sum_minima: pd.DataFrame | None = None,
         sum_peak: pd.DataFrame | None = None,
         sum_cols: List[str] | None = None,
+        ims: bool = False,
     ) -> None:
         """Initialize SBSResult object and intergrate all activation data."""
 
@@ -251,15 +254,31 @@ class SBSResult:
             ],
             axis=1,
         )
-        pp_sumactivation = pp_sumactivation.set_index(maxquant_ref_df.index)
+        maxquant_ref_df["Reverse"] = np.where(maxquant_ref_df["Reverse"].isnull(), 0, 1)
+        Logger.info("Reference shape: %s", maxquant_ref_df.shape)
+        Logger.info("Experiment shape: %s", maxquant_exp_df.shape)
+        if ims:
+            self.ref_df = pd.merge(
+                left=maxquant_ref_df,
+                right=sum_raw,
+                left_on="mz_rank",
+                right_index=True,
+                how="inner",
+            )
+            Logger.debug(
+                "Reference shape after merging activation sum: %s", self.ref_df.shape
+            )
+        else:
+            pp_sumactivation = pp_sumactivation.set_index(maxquant_ref_df.index)
+            self.ref_df = pd.concat([maxquant_ref_df, pp_sumactivation], axis=1)
 
-        self.ref_df = pd.concat([maxquant_ref_df, pp_sumactivation], axis=1)
-        self.ref_df["Reverse"] = np.where(maxquant_ref_df["Reverse"].isnull(), 0, 1)
         self.exp_df = maxquant_exp_df.copy()
         self.exp_df["Reverse"] = np.where(maxquant_exp_df["Reverse"].isnull(), 0, 1)
 
         self.ref_exp_df_inner = None
+        Logger.debug("sum cols: %s", self.sum_cols)
         self.ref_df_non_zero = self.ref_df.loc[self.ref_df[self.sum_cols[0]] > 0, :]
+        Logger.debug("Reference non zero shape: %s", self.ref_df_non_zero.shape)
 
     def compare_with_maxquant_exp_int(
         self,
@@ -284,8 +303,26 @@ class SBSResult:
         :param save_dir: The directory to save the plot. If None, the plot will not be saved.
         :type save_dir: str or None, optional
         """
+        # print("Hello")
+        match handle_mul_exp_pcm:
+            case "drop":
+                n_pre_drop = self.exp_df.shape[0]
+                self.exp_df = self.exp_df.drop_duplicates(
+                    subset=["Modified sequence", "Charge"], keep=False
+                )
+                n_post_drop = self.exp_df.shape[0]
+                Logger.info(
+                    "Drop all duplicated pcm. %s -> %s", n_pre_drop, n_post_drop
+                )
+            case "agg":
+                self.exp_df = sum_pcm_intensity_from_exp(self.exp_df)
+            case "preserve":
+                self.exp_df = self.exp_df
+
         maxquant_ref_and_exp = merge_with_maxquant_exp(
-            maxquant_exp_df=self.exp_df, maxquant_ref_df=self.ref_df
+            maxquant_exp_df=self.exp_df,
+            maxquant_ref_df=self.ref_df_non_zero,
+            ref_cols=self.sum_cols,
         )
 
         maxquant_ref_and_exp = evaluate_rt_overlap(
@@ -300,32 +337,9 @@ class SBSResult:
             Logger.info(
                 "No filter_by_rt_overlap is specified, use all entries for plotting."
             )
-        match handle_mul_exp_pcm:
-            case "drop":
-                n_pre_drop = maxquant_ref_and_exp.shape[0]
-                maxquant_ref_and_exp_sum_intensity = (
-                    maxquant_ref_and_exp.drop_duplicates(
-                        subset=["Modified sequence", "Charge"], keep=False
-                    )
-                )
-                n_post_drop = maxquant_ref_and_exp_sum_intensity.shape[0]
-                Logger.info(
-                    "Drop all duplicated pcm. %s -> %s", n_pre_drop, n_post_drop
-                )
-            case "agg":
-                maxquant_ref_and_exp_sum_intensity = sum_pcm_intensity_from_exp(
-                    maxquant_ref_and_exp
-                )
-            case "preserve":
-                maxquant_ref_and_exp_sum_intensity = maxquant_ref_and_exp
 
-        maxquant_ref_and_exp_sum_intensity_act = add_sum_act_cols(
-            maxquant_ref_and_exp_sum_intensity, self.sum_cols, self.ref_df
-        )
-
-        self.ref_exp_df_inner = maxquant_ref_and_exp_sum_intensity_act.loc[
-            maxquant_ref_and_exp_sum_intensity_act[self.sum_cols[0]] > 0, :
-        ]
+        self.ref_exp_df_inner = maxquant_ref_and_exp
+        Logger.info("Ref exp inner join shape: %s", self.ref_exp_df_inner.shape)
 
     def plot_intensity_corr(
         self,
@@ -351,6 +365,7 @@ class SBSResult:
         save_format: str = "png",
         show_ref: bool = False,
     ):
+        Logger.debug("Experiment columns: %s", self.exp_df.columns)
         self.exp_df_unique_PCM = (
             self.exp_df.groupby(["Modified sequence", "Charge", "Reverse"])
             .agg(
@@ -363,6 +378,7 @@ class SBSResult:
             )
             .reset_index()
         )
+        Logger.info("Unique PCM TD in experiment: %s", self.exp_df_unique_PCM.shape)
         self.exp_df_unique_PCM["precursor"] = self.exp_df_unique_PCM[
             "Modified sequence"
         ] + self.exp_df_unique_PCM["Charge"].astype(str)
@@ -370,6 +386,9 @@ class SBSResult:
         self.ref_df_non_zero["precursor"] = self.ref_df_non_zero[
             "Modified sequence"
         ] + self.ref_df_non_zero["Charge"].astype(str)
+        Logger.info(
+            "Unique PCM TD in non zero activations: %s", self.ref_df_non_zero.shape
+        )
         if show_ref:
             self.ref_df["precursor"] = self.ref_df["Modified sequence"] + self.ref_df[
                 "Charge"

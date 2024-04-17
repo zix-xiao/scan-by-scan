@@ -10,8 +10,13 @@ import plotly.express as px
 import seaborn as sns
 from matplotlib_venn import venn2, venn3
 from scipy import stats
+from sparse import SparseArray
 from .tools import ExtractPeak
-
+from postprocessing.ims_3d import (
+    get_ref_rt_im_range,
+    slice_pept_act,
+    prepare_slice_pept_act_df,
+)
 
 Logger = logging.getLogger(__name__)
 
@@ -543,33 +548,34 @@ def plot_activation(
     maxquant_ref_row: pd.Series,
     maxquant_exp_df: pd.DataFrame,
     precursor_activations: list,
-    precursor_cos_dists: list | None,
-    activation_labels: list,
-    cos_dist_labels: list | None,
     ms1scan_no_array: pd.DataFrame,
+    activation_labels: list,
+    precursor_cos_dists: list | None = None,
+    cos_dist_labels: list | None = None,
     log_intensity: bool = False,
     x_ticks: Literal["time", "scan index"] = "time",
     save_dir=None,
     save_format: str = "png",
+    ms1scan_time_col="starttime",
 ):
     """Plot the activation profile of a precursor"""
     # get the RT search range
     rt_search_range = [
-        maxquant_ref_row["RT_search_left"],
-        maxquant_ref_row["RT_search_right"],
+        maxquant_ref_row["RT_search_left"].values[0],
+        maxquant_ref_row["RT_search_right"].values[0],
     ]
-    rt_search_center = maxquant_ref_row["RT_search_center"]
+    rt_search_center = maxquant_ref_row["RT_search_center"].values[0]
     Logger.debug("RT search range: %s", rt_search_range)
 
     # find the corresponding experiment match
-    mod_seq = maxquant_ref_row["Modified sequence"]
-    charge = maxquant_ref_row["Charge"]
+    mod_seq = maxquant_ref_row["Modified sequence"].values[0]
+    charge = maxquant_ref_row["Charge"].values[0]
+    Logger.debug("mod_seq: %s, charge: %s", mod_seq, charge)
     exp_match = maxquant_exp_df.loc[
         (maxquant_exp_df["Modified sequence"] == mod_seq)
         & (maxquant_exp_df["Charge"] == charge),
         :,
     ]
-
     # find the smallest and largest RT in the experiment and RT search range and filter activation
     rt_min = min(
         [
@@ -583,15 +589,23 @@ def plot_activation(
             maxquant_ref_row["RT_search_right"].max(),
         ]
     )
-    scan_index = ms1scan_no_array[
-        (ms1scan_no_array["starttime"] >= rt_min)
-        & (ms1scan_no_array["starttime"] <= rt_max)
-    ].index
-    Logger.debug("ScanIdx: %s", scan_index)
+    Logger.debug(
+        "RT exp range %s",
+        [
+            exp_match["Calibrated retention time start"].values,
+            exp_match["Calibrated retention time finish"].values,
+        ],
+    )
+    scan_index = ms1scan_no_array.loc[
+        (ms1scan_no_array[ms1scan_time_col] >= rt_min)
+        & (ms1scan_no_array[ms1scan_time_col] <= rt_max),
+        ms1scan_time_col,
+    ]
+    # Logger.debug("ScanIdx: %s", scan_index)
 
     time_profiles = pd.DataFrame(dict(zip(activation_labels, precursor_activations)))
-    time_profiles = time_profiles.set_index(ms1scan_no_array["starttime"])
-    activation_in_range = time_profiles.iloc[scan_index, :]
+    time_profiles = time_profiles.set_index(ms1scan_no_array[ms1scan_time_col])
+    activation_in_range = time_profiles.loc[scan_index, :]
 
     if log_intensity:
         activation_in_range = np.log10(activation_in_range + 1)
@@ -778,3 +792,73 @@ def plot_im_or_mz_int(
     plt.title(title)
 
     plt.show()
+
+
+def plot_pept_im_rt_heatmap(
+    pept_mz_rank: int,
+    act_3d: SparseArray,
+    maxquant_result_dict: pd.DataFrame,
+    maxquant_result_exp: pd.DataFrame | None,
+    mobility_values_df: pd.DataFrame,
+    ms1scans: pd.DataFrame,
+    plot_range: Literal["nonzero", "custom"] = "nonzero",
+    rt_range: tuple | None = None,
+    im_range: tuple | None = None,
+):
+    """plot the heatmap of peptide ion mobility and retention time"""
+    (modseq, charge) = maxquant_result_dict.loc[
+        maxquant_result_dict["mz_rank"] == pept_mz_rank, ["Modified sequence", "Charge"]
+    ].values[0]
+    Logger.info(
+        "Dictionary entry %s",
+        maxquant_result_dict.loc[
+            maxquant_result_dict["mz_rank"] == pept_mz_rank,
+            [
+                "Modified sequence",
+                "Charge",
+                "RT_search_left",
+                "RT_search_right",
+                "RT_search_center",
+            ],
+        ],
+    )
+    if maxquant_result_exp is not None:
+        Logger.info(
+            "Experiment result: %s",
+            maxquant_result_exp.loc[
+                (maxquant_result_exp["Modified sequence"] == modseq)
+                & (maxquant_result_exp["Charge"] == charge),
+                [
+                    "Modified sequence",
+                    "Charge",
+                    "Calibrated retention time start",
+                    "Calibrated retention time finish",
+                    "Retention time",
+                    "Ion mobility index",
+                    "m/z",
+                    "1/K0",
+                    "1/K0 length",
+                    # "mz_rank",
+                    "Score",
+                    "Intensity",
+                ],
+            ],
+        )
+    rt_idx_range, im_idx_range, reference_entry = get_ref_rt_im_range(
+        pept_mz_rank=pept_mz_rank,
+        maxquant_result_dict=maxquant_result_dict,
+        mobility_values_df=mobility_values_df,
+        ms1scans=ms1scans,
+        ref_rt_range=rt_range,
+        ref_im_range=im_range,
+    )
+    slice_pept_act_sparse, rt_idx_range, im_idx_range = slice_pept_act(
+        pept_act_sparse=act_3d[:, :, pept_mz_rank],
+        plot_range=plot_range,
+        rt_idx_range=rt_idx_range,
+        im_idx_range=im_idx_range,
+    )
+    data_3d_heatmap = prepare_slice_pept_act_df(
+        slice_pept_act_sparse, rt_idx_range, im_idx_range, mobility_values_df, ms1scans
+    )
+    ax = sns.heatmap(data_3d_heatmap)

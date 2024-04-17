@@ -2,6 +2,7 @@
 import logging
 from typing import Literal, List
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 from utils.plot import save_plot
 from utils.tools import _perc_fmt
@@ -12,6 +13,7 @@ Logger = logging.getLogger(__name__)
 def merge_with_maxquant_exp(
     maxquant_exp_df: pd.DataFrame,
     maxquant_ref_df: pd.DataFrame,
+    ref_cols: List[str] | None = None,
 ):
     """compare the inferred intensities from maxquant and SBS,
         when a different dictionary then experiment MQ result is used
@@ -32,7 +34,10 @@ def merge_with_maxquant_exp(
                 "id",
                 "RT_search_left",
                 "RT_search_right",
+                "mz_rank",
+                "Reverse",
             ]
+            + ref_cols
         ],
         right=maxquant_exp_df[
             [
@@ -49,10 +54,11 @@ def merge_with_maxquant_exp(
         how="right",
         indicator=True,
     )
-    Logger.debug("Maxquant experiment file has %s entries.", maxquant_exp_df.shape[0])
-    Logger.debug(
-        "columns after merge MQ dict and MQ exp %s", maxquant_ref_and_exp.columns
-    )
+    Logger.debug("Experiment file has %s entries.", maxquant_exp_df.shape[0])
+    Logger.debug("Merged file has %s entries.", maxquant_ref_and_exp.shape[0])
+    # Logger.debug(
+    #     "columns after merge MQ dict and MQ exp %s", maxquant_ref_and_exp.columns
+    # )
     return maxquant_ref_and_exp
 
 
@@ -68,10 +74,14 @@ def evaluate_rt_overlap(
         ):
             return "full_overlap"
         elif (
-            row["RT_search_right"] < row["Calibrated retention time start"]
-            or row["RT_search_left"] > row["Calibrated retention time finish"]
+            row["RT_search_right"] >= row["Calibrated retention time start"]
+            or row["RT_search_left"] <= row["Calibrated retention time finish"]
         ):
             return "partial_overlap"
+        elif np.isnan(row["Calibrated retention time start"]):
+            return "no_entry_in_exp"
+        elif np.isnan(row["RT_search_left"]):
+            return "no_entry_in_ref"
         else:
             return "no_overlap"
 
@@ -114,14 +124,14 @@ def filter_merged_by_rt_overlap(
     return filtered
 
 
-def sum_pcm_intensity_from_exp(maxquant_ref_and_exp: pd.DataFrame):
+def sum_pcm_intensity_from_exp(maxquant_exp: pd.DataFrame):
     """sum the intensity of the precursors from the experiment file
 
     In case of multiple PCM start and finish are the RT range of the precursor
     """
-    n_pre_agg = maxquant_ref_and_exp.shape[0]
+    n_pre_agg = maxquant_exp.shape[0]
     maxquant_ref_and_exp_sum_intensity = (
-        maxquant_ref_and_exp.groupby(["Modified sequence", "Charge"])
+        maxquant_exp.groupby(["Modified sequence", "Charge"])
         .agg(
             {
                 "Calibrated retention time start": "min",
@@ -133,17 +143,19 @@ def sum_pcm_intensity_from_exp(maxquant_ref_and_exp: pd.DataFrame):
                 "Mass": "first",
                 "m/z": "first",
                 "Length": "first",
+                "Reverse": "first",
             }
         )
         .reset_index()
     )
     n_post_agg = maxquant_ref_and_exp_sum_intensity.shape[0]
     Logger.info(
-        "Removing %s entries with aggregation over PCM, %s entries left.",
+        "Experiment data: removing %s entries with aggregation over PCM, %s entries"
+        " left.",
         n_pre_agg - n_post_agg,
         n_post_agg,
     )
-    Logger.debug("columns after agg %s", maxquant_ref_and_exp_sum_intensity.columns)
+    # Logger.debug("columns after agg %s", maxquant_ref_and_exp_sum_intensity.columns)
     return maxquant_ref_and_exp_sum_intensity
 
 
