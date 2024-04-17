@@ -144,40 +144,6 @@ def select_peak_from_activation(
     return sum_peak
 
 
-def select_peaks_from_im_pept_act(im_pept_act: np.ndarray, pept_id: np.ndarray):
-    # filtered only the columns with nonzero value > = 3
-    pept_nonzero_count = np.count_nonzero(im_pept_act, axis=0)
-    pept_valid_idx = np.where(pept_nonzero_count >= 3)[0]
-    Logger.info("Number of peptides with nonzero value >= 3: %s", len(pept_valid_idx))
-    peaks = [
-        extract_peaks_in_im(
-            im_pept_act_array=im_pept_act[:, idx], index=idx, pept_id=pept_id[idx]
-        )
-        for idx in pept_valid_idx
-    ]
-    return peaks
-
-
-def extract_peaks_in_im(
-    im_pept_act_array, index: int, pept_id: int, height=0.1, width=3, rel_height=1
-):
-    peaks, peak_properties = find_peaks(
-        im_pept_act_array, height=height, width=width, rel_height=rel_height
-    )
-    peak_properties["pept_id_index"] = np.repeat(index, len(peaks))
-    peak_properties["pept_id"] = np.repeat(pept_id, len(peaks))
-    peak_properties["peak"] = peaks
-    return pd.DataFrame(peak_properties) if peaks.size > 0 else None
-
-
-def sum_im_act_per_pept(peak_row, im_pept_act):
-    pept_id_index = int(peak_row["pept_id_index"])
-    peak_start = int(peak_row["left_ips"])
-    peak_end = int(peak_row["right_ips"])
-    peak_sum = im_pept_act[peak_start : peak_end + 1, pept_id_index].sum()
-    return peak_sum
-
-
 def extract_elution_peak_from_act_row(
     activation_row: Union[pd.Series, np.array],
     ms1scans_no_array: pd.DataFrame,
