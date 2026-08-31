@@ -28,9 +28,9 @@ __C.N_CPU = (
 
 # prepare dictionary
 __C.PREPARE_DICT = ConfigurationNode()
-__C.PREPARE_DICT.SEARCH_ENGINE = "maxquant"  # one of ["maxquant", "fragpipe", "sage"]
+__C.PREPARE_DICT.SEARCH_ENGINE = "fragpipe"  # one of ["maxquant", "fragpipe", "sage"]
 __C.PREPARE_DICT.RT_REF = (
-    "pred"  # How to calc ref RT; supported: "pred" (AlphaPeptDeep model)
+    "ref"  # How to calc ref RT; supported: "pred" (AlphaPeptDeep model)
 )
 __C.PREPARE_DICT.IM_REF = (
     "ref"  # How to calc ref IM; supported: "ref" (from search engine output)
@@ -106,13 +106,9 @@ __C.MATCH_FEATURES_KWARGS.phase_correlation_kwargs = ConfigurationNode()
 __C.MATCH_FEATURES_KWARGS.phase_correlation_kwargs.upsample_factor = 10  # passed to skimage.registration.phase_cross_correlation; sub-pixel registration precision = 1/upsample_factor pixels. Only used when alignment_method="phase_correlation".
 __C.MATCH_FEATURES_KWARGS.phase_correlation_kwargs.normalization = None  # passed to skimage.registration.phase_cross_correlation: None (raw cross-correlation, default here) or "phase" (phase-only whitening). None matches the convention already used for full-image phase correlation elsewhere (swaps.postprocessing.rt_im_image_registration) -- phase-only whitening is noise-sensitive on this sparse data. Only used when alignment_method="phase_correlation".
 __C.MATCH_FEATURES_KWARGS.broad_alignment = ConfigurationNode()
-__C.MATCH_FEATURES_KWARGS.broad_alignment.enabled = False  # if True, center each candidate's per-run RT/IM template-match search on a precalibrated, RT-binned majority-vote shift (swaps.postprocessing.broad_alignment) instead of searching the whole image -- fixes low-S/N peptides picking a spurious, far-away shift, while still letting the true local optimum (bounded by max_deviation) win over the table's own (imperfect, per-bin) estimate. The table auto-builds (if missing) at RESULT_PATH/broad_alignment_shift_table.parquet, shared across every quantification_* config variant of the same dataset. No-ops with a warning if align_images=False. rt_shift/im_shift/template_matching_score stay real (non-NaN) values and remain in the Mokapot FDR feature list.
-__C.MATCH_FEATURES_KWARGS.broad_alignment.max_deviation = 5  # radius (in RT/IM pixel units of the activation image -- one row per MS1 frame, one column per mobility bin) of the constrained search window around the calibrated shift; 0 forces the exact calibrated shift (just rescoring there), larger values allow more local refinement at some risk of drifting toward a nearby wrong peak.
+__C.MATCH_FEATURES_KWARGS.broad_alignment.enabled = True  # if True, center each candidate's per-run RT/IM template-match search on a precalibrated, RT-binned majority-vote shift (swaps.postprocessing.broad_alignment) instead of searching the whole image -- fixes low-S/N peptides picking a spurious, far-away shift, while still letting the true local optimum (bounded by max_deviation) win over the table's own (imperfect, per-bin) estimate. The table auto-builds (if missing) at RESULT_PATH/broad_alignment_shift_table.parquet, shared across every quantification_* config variant of the same dataset. No-ops with a warning if align_images=False. rt_shift/im_shift/template_matching_score stay real (non-NaN) values and remain in the Mokapot FDR feature list.
+__C.MATCH_FEATURES_KWARGS.broad_alignment.max_deviation = 0  # radius (in RT/IM pixel units of the activation image -- one row per MS1 frame, one column per mobility bin) of the constrained search window around the calibrated shift; 0 forces the exact calibrated shift (just rescoring there), larger values allow more local refinement at some risk of drifting toward a nearby wrong peak.
 __C.MATCH_FEATURES_KWARGS.broad_alignment.multi_scale_template_fracs = []  # extra template_frac values (each in (0, 0.5]) to additionally search at, alongside the main MATCH_FEATURES_KWARGS.template_frac -- adds shift_rt/shift_im/template_matching_score/delta_shift_rt/delta_shift_im/delta_template_matching_score columns suffixed "_frac_<x>" per value, for real targets AND both decoy strategies (peptide_swap decoys get a genuine re-search against each scale's own template; off_target decoys and the consensus row reuse/sentinel the same values as the main scale, mirroring how they already treat the main scale). Only takes effect when align_images=True, broad_alignment.enabled=True, and max_deviation=0 (same gating as the existing single-scale delta_* columns) -- empty list (default) = disabled, zero extra cost.
-__C.MATCH_FEATURES_KWARGS.broad_alignment.image_based = ConfigurationNode()
-__C.MATCH_FEATURES_KWARGS.broad_alignment.image_based.enabled = False  # if True, sbs_runner_ims.py also calibrates RESULT_PATH/broad_alignment_shift_table_global_raw_image.parquet (swaps.postprocessing.broad_alignment_image_based) alongside the peptide-activation-image-based table -- production broad_alignment.enabled runs are peptide-activation-image based only (match_features.py never reads the image-based table), so this defaults off to skip the extra reopen-every-raw-.d-file-via-AlphaTims cost (~15GB RSS/file). Kept available for future work on the image-based alternative.
-__C.MATCH_FEATURES_KWARGS.broad_alignment.image_based.window_widths = [40, 60, 120, 240]  # sliding-window widths (MS1 frames) swept per raw-file pair when fitting the image-based rt_shift(rt) curve (swaps.postprocessing.broad_alignment_image_based) -- an alternative to broad_alignment.py's calibration-peptide table, built from full-image phase correlation instead; writes its own RESULT_PATH/broad_alignment_shift_table_global_raw_image.parquet (does not touch/replace the peptide-based table). Larger widths average over more signal (smoother, less prone to peak-hopping) at the cost of RT resolution. Only used when image_based.enabled=True.
-__C.MATCH_FEATURES_KWARGS.broad_alignment.image_based.strides = [5, 20]  # sliding-window strides (MS1 frames) swept alongside window_widths.
 __C.MATCH_FEATURES_KWARGS.dir_name = "quantification"
 __C.MATCH_FEATURES_KWARGS.batching = ConfigurationNode()
 __C.MATCH_FEATURES_KWARGS.batching.batch_size_max = 500  # max peptides/confounder-group-members per worker batch
@@ -169,7 +165,7 @@ __C.MATCH_FEATURES_KWARGS.peak_consensus_kwargs.compactness = 0.001
 __C.MATCH_FEATURES_KWARGS.peak_consensus_kwargs.normalize_before_hmaxima = False
 __C.MATCH_FEATURES_KWARGS.consensus_decoy_kwargs = ConfigurationNode()
 __C.MATCH_FEATURES_KWARGS.consensus_decoy_kwargs.strategies = [
-    "peptide_swap",
+    "bbox_swap",
 ]  # ["peptide_swap", "off_target_shift", "bbox_swap", "bbox_noise"]
 __C.MATCH_FEATURES_KWARGS.consensus_decoy_kwargs.n_peptide_swap_decoys = 1
 __C.MATCH_FEATURES_KWARGS.consensus_decoy_kwargs.n_off_target_shift_decoys = 1
@@ -178,7 +174,7 @@ __C.MATCH_FEATURES_KWARGS.consensus_decoy_kwargs.off_target_max_overlap_fraction
 # peptide_swap/bbox_swap only: prefer near-isobaric co-eluting candidates
 # (confounders column in dict_ref) as decoy source; falls back to full batch if
 # none are in-batch
-__C.MATCH_FEATURES_KWARGS.consensus_decoy_kwargs.use_confounder_sampling = True
+__C.MATCH_FEATURES_KWARGS.consensus_decoy_kwargs.use_confounder_sampling = False
 # bbox_swap: BEFORE alignment, splices a randomly sampled foreign peptide's
 # own center-cropped patch (native shape, no whole-image resize) into this
 # run's own genuine raw image at its own known anchor (Reference/Quant_Only
@@ -188,7 +184,7 @@ __C.MATCH_FEATURES_KWARGS.consensus_decoy_kwargs.use_confounder_sampling = True
 # reusing the target's. See _build_bbox_swap_decoy_raw_image in
 # match_features.py.
 __C.MATCH_FEATURES_KWARGS.consensus_decoy_kwargs.n_bbox_swap_decoys = 1
-__C.MATCH_FEATURES_KWARGS.consensus_decoy_kwargs.bbox_swap_template_frac = 0.2  # half-width (as a fraction of each dim) of the swapped bbox; independent of the alignment template_frac above
+__C.MATCH_FEATURES_KWARGS.consensus_decoy_kwargs.bbox_swap_template_frac = 0.3  # half-width (as a fraction of each dim) of the swapped bbox; independent of the alignment template_frac above
 __C.MATCH_FEATURES_KWARGS.consensus_decoy_kwargs.bbox_swap_max_intensity_tries = 5  # resample a different foreign peptide up to this many times if the sampled patch is all-zero; whether the eventual intensity is real signal or background noise doesn't matter, only that it's non-empty
 # bbox_noise: BEFORE alignment, replaces this run's own anchor-centred bbox
 # with a per-pixel resample of the REST of that same run's own image (its own
