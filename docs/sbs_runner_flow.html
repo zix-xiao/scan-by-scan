@@ -338,7 +338,11 @@ flowchart TD
     DELTAGATE{"broad_alignment.enabled AND<br/>max_deviation == 0?"}
     DELTAY["+ delta_shift_rt/im,<br/>delta_template_matching_score<br/>+ per multi_scale_template_fracs value:<br/>same 6 cols suffixed _frac_&lt;x&gt;"]
     DELTAN["no delta features"]
-    PERC["brew_with_percolator (Mokapot/XGBoost)<br/>PERCOLATOR_POST_PROCESSING: tdc / mix-max"]
+    TRAINDATA{"FDR.METHOD entry:<br/>TRAINING_DATA?"}
+    ALLSEMI["brew_with_percolator<br/>trains + scores the full population directly<br/>POST_PROCESSING: tdc / mix-max"]
+    MSMSGATE{"FDR.METHOD entry:<br/>METHOD?"}
+    MSMSSEMI["brew_with_percolator(train_df=trusted pool)<br/>Percolator static model: train+freeze on MS/MS-trusted<br/>pool, then score full population<br/>POST_PROCESSING: tdc / mix-max"]
+    MSMSSUP["brew_trusted_target_model(model_type='supervised')<br/>fixed-label LinearSVC on MS/MS-trusted pool,<br/>no iterative refinement, no percolator CLI"]
     QVAL["keep q-value less than 0.01<br/>to pp_match_target_filtered"]
   end
 
@@ -434,10 +438,16 @@ flowchart TD
   ALIGNY --> DELTAGATE
   DELTAGATE -->|yes| DELTAY
   DELTAGATE -->|no| DELTAN
-  ALIGNN --> PERC
-  DELTAY --> PERC
-  DELTAN --> PERC
-  PERC --> QVAL
+  ALIGNN --> TRAINDATA
+  DELTAY --> TRAINDATA
+  DELTAN --> TRAINDATA
+  TRAINDATA -->|All| ALLSEMI
+  TRAINDATA -->|MS/MS| MSMSGATE
+  MSMSGATE -->|semi-supervised| MSMSSEMI
+  MSMSGATE -->|supervised| MSMSSUP
+  ALLSEMI --> QVAL
+  MSMSSEMI --> QVAL
+  MSMSSUP --> QVAL
   QVAL --> PIVOT
   NOFDR --> PIVOT
   PIVOT --> LFQ
@@ -459,11 +469,11 @@ flowchart TD
   classDef terminal fill:#1f7a8c,stroke:#0d3d46,stroke-width:1.5px,color:#ffffff;
 
   class Start,DONE terminal
-  class D0,TS,NCPU,ENGINE,OK,EXCL,SWAGATE,USEIMS,MERGEC,BA,DECOYGATE,INTTHRES,OSM,FDREN,ALIGNFEAT,DELTAGATE cfgGate
+  class D0,TS,NCPU,ENGINE,OK,EXCL,SWAGATE,USEIMS,MERGEC,BA,DECOYGATE,INTTHRES,OSM,FDREN,ALIGNFEAT,DELTAGATE,TRAINDATA,MSMSGATE cfgGate
   class DICTCHK,COSWACOL,NEXTD,BATBL,COSWAEXCL,IONQ stateGate
   class NOTIMPL warn
   class BUILD,ACTOUT,QUANTDIR,DICTREADY artifact
-  class LOADCFG,TSY,TSN,NCPUY,NCPUN,EVMQ,EVSAGE,EVFP,OKY,OKN,EXCLY,EXCLN,FDRRESUME,PERFILE,LOADD,ADDIDX,COSWAIDX,SOLVE,MERGECY,MERGECN,FFMPRE,BASKIP,BACALC,MATCH,DECOYY,DECOYN,FDRSTAGE,INTY,INTN,OSMY,OSMN,NOFDR,ALIGNY,ALIGNN,DELTAY,DELTAN,PERC,QVAL,PIVOT,LFQ,COSWAEXCLY,RESULTAN,IONQY,IONQN step
+  class LOADCFG,TSY,TSN,NCPUY,NCPUN,EVMQ,EVSAGE,EVFP,OKY,OKN,EXCLY,EXCLN,FDRRESUME,PERFILE,LOADD,ADDIDX,COSWAIDX,SOLVE,MERGECY,MERGECN,FFMPRE,BASKIP,BACALC,MATCH,DECOYY,DECOYN,FDRSTAGE,INTY,INTN,OSMY,OSMN,NOFDR,ALIGNY,ALIGNN,DELTAY,DELTAN,ALLSEMI,MSMSSEMI,MSMSSUP,QVAL,PIVOT,LFQ,COSWAEXCLY,RESULTAN,IONQY,IONQN step
 </pre>
     </div>
     <p class="diagram-caption">Scroll horizontally / pinch-zoom on the panel above — the graph is wide by design, it mirrors six sequential stages left to bottom.</p>
@@ -542,17 +552,19 @@ flowchart TD
   </div>
 
   <h2><span class="stage-no">05</span>FDR Control</h2>
-  <p class="lede">Percolator is <i>always</i> trained and scored on the full target+decoy pool regardless of <code>ONLY_SCORE_MATCH</code> — that flag only gates which rows are exempted from the resulting q-value filter (recent fix, see commit <code>746a90d</code>).</p>
+  <p class="lede">Each <code>FDR.METHOD</code> list entry picks two independent things: <code>TRAINING_DATA</code> ("All" = full target+decoy pool trains and scores itself; "MS/MS" = only MS/MS-confirmed targets + a balanced decoy sample train the model, which is then applied to the full population) and <code>METHOD</code> ("semi-supervised" = real Percolator CLI, iterative label refinement; "supervised" = fixed-label <code>LinearSVC</code> fit, no iterative refinement — only valid with <code>TRAINING_DATA="MS/MS"</code>). The rescoring engine is derived from the pair, not chosen directly: "semi-supervised"+"All" trains/scores the full pool directly in one Percolator run; "semi-supervised"+"MS/MS" trains Percolator on the trusted pool and freezes those weights via Percolator's own static-model mode (<code>--weights</code> then <code>--static --init-weights</code>, see doi:10.1021/acs.jproteome.9b00780) before scoring everything; "supervised" never invokes the Percolator CLI at all. <code>ONLY_SCORE_MATCH</code> only gates which rows are exempted from the resulting q-value filter, independent of training/scoring population (recent fix, see commit <code>746a90d</code>).</p>
   <div class="table-wrap">
     <table>
       <thead><tr><th>Key</th><th>Default</th><th>Effect</th></tr></thead>
       <tbody>
         <tr><td class="key">FDR.INT_THRES</td><td class="default">100</td><td class="effect">Intensity floor applied first, uniformly, to every pp row (target/decoy, Match/MS-MS alike) before any other gate; 0 disables it.</td></tr>
         <tr><td class="key">FDR.ONLY_SCORE_MATCH</td><td class="default">True</td><td class="effect">True routes Reference/Quant-Only ("MS/MS-status") rows straight to output labeled "MS/MS", skipping the q-value&lt;0.01 filter; only "Match"-status rows are held to it.</td></tr>
-        <tr><td class="key">FDR.ENABLED</td><td class="default">True</td><td class="effect">False skips Mokapot/percolator entirely — <code>pp_match_target_filtered</code> is just the intensity-filtered pool, written to <code>intensity_filtered_postprocessing/</code> instead of a <code>percolator_postprocessing_*/</code> dir.</td></tr>
-        <tr><td class="key">FDR.PERCOLATOR_POST_PROCESSING</td><td class="default">tdc</td><td class="effect"><code>tdc</code> (target-decoy competition, percolator <code>-Y</code>) or <code>mix-max</code> (percolator <code>-y</code>); also names the output subdirectory.</td></tr>
-        <tr><td class="key">FDR.TRAIN / FDR.TEST</td><td class="default">0.01 / 0.01</td><td class="effect">Passed to percolator as <code>-F</code>/<code>-f</code>. <code>FDR.TRAIN</code> also suffixes the output subdirectory (<code>percolator_postprocessing_&lt;method&gt;_trainfdr&lt;value&gt;/</code>) since it changes what percolator learns, unlike <code>ONLY_SCORE_MATCH</code>. Default matches percolator's own built-in <code>-F</code> default (0.01), which is what every run used before these were wired up.</td></tr>
-        <tr><td class="key">MATCH_FEATURES_KWARGS.align_images</td><td class="default">True</td><td class="effect">Gates whether alignment-derived columns (rt/im shift, template_matching_score) enter the percolator feature set at all, vs. base geometry/correlation features only.</td></tr>
+        <tr><td class="key">FDR.ENABLED</td><td class="default">True</td><td class="effect">False skips Percolator/mokapot entirely — <code>pp_match_target_filtered</code> is just the intensity-filtered pool, written to <code>intensity_filtered_postprocessing/</code> instead of a <code>trainingdata_*/</code> dir.</td></tr>
+        <tr><td class="key">FDR.METHOD</td><td class="default">[{TRAINING_DATA: All,<br/>METHOD: semi-supervised}]</td><td class="effect">List of <code>{TRAINING_DATA, METHOD}</code> entries (see lede above); each listed entry reruns the rescoring + finalize tail once more into its own <code>quant_dir</code> subdir — no combined/ensembled output. "supervised" is only valid with <code>TRAINING_DATA="MS/MS"</code>.</td></tr>
+        <tr><td class="key">FDR.POST_PROCESSING</td><td class="default">[tdc]</td><td class="effect">List of <code>tdc</code> (target-decoy competition, Percolator <code>-Y</code>) / <code>mix-max</code> (Percolator <code>-y</code>); used whenever an <code>FDR.METHOD</code> entry has <code>METHOD="semi-supervised"</code> (either <code>TRAINING_DATA</code>) — each listed value reruns that entry once more with that post-processing, so e.g. <code>[tdc, mix-max]</code> runs both for every semi-supervised entry. Ignored for <code>METHOD="supervised"</code> entries. Also names the output subdirectory.</td></tr>
+        <tr><td class="key">FDR.DECOY_TARGET_RATIO / DECOY_MSMS_ONLY / SEED</td><td class="default">1.0 / False / 0</td><td class="effect">Only used for <code>TRAINING_DATA="MS/MS"</code> entries — control the MS/MS-trusted training pool (decoys sampled per trusted target, whether decoys are restricted to MS/MS-confirmed slots, and the subsampling/CV seed). See <code>select_trusted_training_rows</code>.</td></tr>
+        <tr><td class="key">FDR.TRAIN / FDR.TEST</td><td class="default">0.01 / 0.01</td><td class="effect">Passed to Percolator as <code>-F</code>/<code>-f</code> (for "supervised" entries, <code>FDR.TRAIN</code> is unused by the fit itself). <code>FDR.TRAIN</code> also suffixes the output subdirectory (<code>trainingdata_&lt;all|msms&gt;_&lt;method&gt;[_postprocessing_&lt;pp&gt;]_trainfdr&lt;value&gt;/</code>) since it changes what the model learns, unlike <code>ONLY_SCORE_MATCH</code>. Default matches Percolator's own built-in <code>-F</code> default (0.01), which is what every run used before these were wired up.</td></tr>
+        <tr><td class="key">MATCH_FEATURES_KWARGS.align_images</td><td class="default">True</td><td class="effect">Gates whether alignment-derived columns (rt/im shift, template_matching_score) enter the rescoring feature set at all, vs. base geometry/correlation features only.</td></tr>
       </tbody>
     </table>
   </div>

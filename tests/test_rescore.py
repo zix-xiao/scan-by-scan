@@ -307,6 +307,10 @@ def _make_mock_run(tmp_path):
         decoy_psms_path = cmd[cmd.index("-M") + 1]
         fake_target.to_csv(psms_path, sep="\t", index=False)
         fake_decoy.to_csv(decoy_psms_path, sep="\t", index=False)
+        if "--weights" in cmd:
+            weights_path = cmd[cmd.index("--weights") + 1]
+            with open(weights_path, "w") as f:
+                f.write("feature1\t0.1\nfeature2\t0.2\nintercept\t-0.5\n")
         return MagicMock(stdout="", stderr="", returncode=0)
 
     return side_effect
@@ -358,6 +362,88 @@ class TestBrewWithPercolator:
                 work_dir=str(tmp_path),
             )
         assert (tmp_path / "percolator_input.tsv").exists()
+
+
+class TestBrewWithPercolatorStaticModel:
+    """train_df realizes Percolator's own static-model mechanism: train on a
+    restricted pool (--weights), freeze, score the full population (--static
+    --init-weights) -- see doi:10.1021/acs.jproteome.9b00780."""
+
+    def test_train_df_none_calls_percolator_once(self, percolator_input_df, tmp_path):
+        with patch(
+            "postprocessing.rescore.subprocess.run", side_effect=_make_mock_run(tmp_path)
+        ) as mock_run:
+            brew_with_percolator(
+                percolator_input_df,
+                feature_cols=["feature1", "feature2"],
+                work_dir=str(tmp_path),
+            )
+        assert mock_run.call_count == 1
+
+    def test_train_df_given_calls_percolator_twice(self, percolator_input_df, tmp_path):
+        train_df = percolator_input_df.iloc[:10]
+        with patch(
+            "postprocessing.rescore.subprocess.run", side_effect=_make_mock_run(tmp_path)
+        ) as mock_run:
+            brew_with_percolator(
+                percolator_input_df,
+                feature_cols=["feature1", "feature2"],
+                work_dir=str(tmp_path),
+                train_df=train_df,
+            )
+        assert mock_run.call_count == 2
+
+    def test_train_pass_writes_weights_score_pass_loads_them_static(
+        self, percolator_input_df, tmp_path
+    ):
+        train_df = percolator_input_df.iloc[:10]
+        captured = []
+
+        def capturing_run(cmd, **kwargs):
+            captured.append(list(cmd))
+            return _make_mock_run(tmp_path)(cmd, **kwargs)
+
+        with patch("postprocessing.rescore.subprocess.run", side_effect=capturing_run):
+            brew_with_percolator(
+                percolator_input_df,
+                feature_cols=["feature1", "feature2"],
+                work_dir=str(tmp_path),
+                train_df=train_df,
+            )
+        train_cmd, score_cmd = captured
+        assert "--weights" in train_cmd
+        assert "-F" in train_cmd  # training pass still trains
+        weights_path = train_cmd[train_cmd.index("--weights") + 1]
+
+        assert "--static" in score_cmd
+        assert "--init-weights" in score_cmd
+        assert score_cmd[score_cmd.index("--init-weights") + 1] == weights_path
+        assert "-F" not in score_cmd  # no training in the static scoring pass
+
+    def test_train_input_tsv_written_separately(self, percolator_input_df, tmp_path):
+        train_df = percolator_input_df.iloc[:10]
+        with patch("postprocessing.rescore.subprocess.run", side_effect=_make_mock_run(tmp_path)):
+            brew_with_percolator(
+                percolator_input_df,
+                feature_cols=["feature1", "feature2"],
+                work_dir=str(tmp_path),
+                train_df=train_df,
+            )
+        assert (tmp_path / "percolator_input.tsv").exists()
+        assert (tmp_path / "percolator_train_input.tsv").exists()
+
+    def test_returns_three_elements(self, percolator_input_df, tmp_path):
+        train_df = percolator_input_df.iloc[:10]
+        with patch("postprocessing.rescore.subprocess.run", side_effect=_make_mock_run(tmp_path)):
+            psms_df, peptides_df, all_psms = brew_with_percolator(
+                percolator_input_df,
+                feature_cols=["feature1", "feature2"],
+                work_dir=str(tmp_path),
+                train_df=train_df,
+            )
+        assert isinstance(psms_df, pd.DataFrame)
+        assert peptides_df is None
+        assert isinstance(all_psms, pd.DataFrame)
 
 
 # ---------------------------------------------------------------------------

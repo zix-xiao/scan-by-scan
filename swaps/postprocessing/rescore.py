@@ -358,6 +358,7 @@ def brew_with_percolator(
     test_fdr: float = 0.1,
     work_dir: Optional[str] = None,
     post_processing: str = "tdc",
+    train_df: pd.DataFrame | None = None,
     **kwargs,
 ):
     """
@@ -367,8 +368,10 @@ def brew_with_percolator(
     ----------
     peptide_info_dataframe : pandas.DataFrame
         DataFrame containing peptide information and features for Percolator input.
+        Always the population that gets scored (see `train_df`).
     train_fdr : float, optional
         FDR threshold for training (default: 0.1). Passed as -F to percolator.
+        Unused when `train_df` is given (no training happens in the scoring pass).
     test_fdr : float, optional
         FDR threshold for reporting results (default: 0.1). Passed as -f to percolator.
     model : BaseEstimator, optional
@@ -379,6 +382,16 @@ def brew_with_percolator(
         Percolator post-processing method for assigning q-values/PEPs: "tdc"
         (target-decoy competition, passed as -Y) or "mix-max" (passed as -y).
         Default: "tdc".
+    train_df : pandas.DataFrame, optional
+        If given, restricts training to this (typically trusted-pool) subset instead
+        of `peptide_info_dataframe`, using Percolator's own static-model mechanism:
+        a first percolator invocation trains on `train_df` and dumps weights
+        (--weights), a second invocation loads them frozen (--static --init-weights)
+        and scores every row of `peptide_info_dataframe` with no retraining. Mirrors
+        the "static model" strategy of doi:10.1021/acs.jproteome.9b00780 (train on a
+        confident/large pool, freeze, apply to the full population) instead of
+        retraining per-population. `peptide_info_dataframe` is always the scored
+        population; `train_df` (when given) is only the training population.
     **kwargs
         Forwarded to prepare_percolator_input (e.g. feature_cols, decoy_col, peptide_col).
 
@@ -416,6 +429,56 @@ def brew_with_percolator(
             "Percolator input already exists, skipping preparation: %s", input_path
         )
 
+    weights_path = None
+    if train_df is not None:
+        train_input_path = os.path.join(work_dir, "percolator_train_input.tsv")
+        weights_path = os.path.join(work_dir, "percolator_train_weights.txt")
+        if not os.path.exists(train_input_path):
+            train_pin_df = prepare_percolator_input(train_df, **kwargs)
+            train_pin_df.to_csv(train_input_path, sep="\t", index=False)
+        if not os.path.exists(weights_path):
+            train_cmd = [
+                "percolator",
+                _PERCOLATOR_POST_PROCESSING_FLAGS[post_processing],
+                "--only-psms",
+                "-I",
+                "separate",
+                "--no-terminate",
+                "-F",
+                str(train_fdr),
+                "-f",
+                str(train_fdr),
+                "--weights",
+                weights_path,
+                "-m",
+                os.path.join(work_dir, "percolator_train_psms.tsv"),
+                "-M",
+                os.path.join(work_dir, "percolator_train_decoy_psms.tsv"),
+                train_input_path,
+            ]
+            Logger.info(
+                "Running percolator (static-model training pass): %s",
+                " ".join(train_cmd),
+            )
+            try:
+                train_proc = subprocess.run(
+                    train_cmd, capture_output=True, text=True, check=True
+                )
+            except subprocess.CalledProcessError as e:
+                raise RuntimeError(
+                    f"Percolator static-model training pass failed (exit {e.returncode}):\n{e.stderr}"
+                ) from e
+            train_log_path = os.path.join(work_dir, "percolator_train_run.log")
+            with open(train_log_path, "w") as f:
+                f.write(train_proc.stdout)
+                if train_proc.stderr:
+                    f.write("\n--- stderr ---\n")
+                    f.write(train_proc.stderr)
+            Logger.info(
+                "Percolator static-model training pass finished; log at %s",
+                train_log_path,
+            )
+
     cmd = [
         "percolator",
         _PERCOLATOR_POST_PROCESSING_FLAGS[post_processing],
@@ -423,16 +486,12 @@ def brew_with_percolator(
         "-I",
         "separate",
         "--no-terminate",
-        "-F",
-        str(train_fdr),
-        "-f",
-        str(test_fdr),
-        "-m",
-        psms_path,
-        "-M",
-        decoy_psms_path,
-        input_path,
     ]
+    if weights_path is not None:
+        cmd += ["--static", "--init-weights", weights_path, "-f", str(test_fdr)]
+    else:
+        cmd += ["-F", str(train_fdr), "-f", str(test_fdr)]
+    cmd += ["-m", psms_path, "-M", decoy_psms_path, input_path]
     Logger.info("Running percolator: %s", " ".join(cmd))
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, check=True)

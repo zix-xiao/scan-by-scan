@@ -376,48 +376,181 @@ class TestBroadAlignmentConfig:
         assert "rt_shift" not in cols
 
 
-class TestFdrMokapotTrustedConfig:
-    def test_default_method_is_percolator(self, cfg):
+def _resolve_fdr_variant(variant: dict) -> tuple[str, str, str, str]:
+    """Mirrors sbs_runner_ims._resolve_fdr_variant's validation logic (not
+    imported to avoid the heavy sbs_runner_ims import chain in config tests --
+    same convention as TestQuantDirFdrSuffix mirroring _quant_dir above)."""
+    training_data = str(variant["TRAINING_DATA"]).strip().lower()
+    method = str(variant["METHOD"]).strip()
+    if training_data not in ("ms/ms", "all"):
+        raise ValueError(
+            f"cfg.FDR.METHOD: unknown TRAINING_DATA {variant['TRAINING_DATA']!r} -- "
+            "expected 'MS/MS' or 'All'"
+        )
+    if method not in ("supervised", "semi-supervised"):
+        raise ValueError(
+            f"cfg.FDR.METHOD: unknown METHOD {method!r} -- expected 'supervised' or "
+            "'semi-supervised'"
+        )
+    if method == "supervised" and training_data != "ms/ms":
+        raise ValueError(
+            "cfg.FDR.METHOD: 'supervised' is only valid with TRAINING_DATA='MS/MS'"
+        )
+    training_data_token = "msms" if training_data == "ms/ms" else "all"
+    method_token = method.replace("-", "")
+    return training_data, method, training_data_token, method_token
+
+
+class TestFdrTrainingDataMethodConfig:
+    def test_default_method(self, cfg):
         """Default preserves current production behaviour untouched."""
-        assert cfg.FDR.METHOD == ["percolator"]
+        assert cfg.FDR.METHOD == [{"TRAINING_DATA": "All", "METHOD": "semi-supervised"}]
 
-    def test_mokapot_trusted_keys_present(self, cfg):
-        for key in ["MODEL_TYPE", "DECOY_TARGET_RATIO", "DECOY_MSMS_ONLY", "SEED"]:
-            assert hasattr(cfg.FDR.MOKAPOT_TRUSTED, key), f"Missing FDR.MOKAPOT_TRUSTED.{key}"
+    def test_default_post_processing(self, cfg):
+        assert cfg.FDR.POST_PROCESSING == ["tdc"]
 
-    def test_mokapot_trusted_defaults(self, cfg):
-        assert cfg.FDR.MOKAPOT_TRUSTED.MODEL_TYPE == "percolator"
-        assert cfg.FDR.MOKAPOT_TRUSTED.DECOY_TARGET_RATIO == 1.0
-        assert cfg.FDR.MOKAPOT_TRUSTED.DECOY_MSMS_ONLY is False
-        assert cfg.FDR.MOKAPOT_TRUSTED.SEED == 0
+    def test_trusted_pool_keys_flat_on_fdr(self, cfg):
+        assert cfg.FDR.DECOY_TARGET_RATIO == 1.0
+        assert cfg.FDR.DECOY_MSMS_ONLY is False
+        assert cfg.FDR.SEED == 0
 
-    def test_method_overridable_via_yaml(self, tmp_path):
+    def test_mokapot_trusted_node_removed(self, cfg):
+        assert not hasattr(cfg.FDR, "MOKAPOT_TRUSTED")
+
+    def test_single_entry_overridable_via_yaml(self, tmp_path):
         from utils.config import merge_cfg_from_file
 
         data = {
             "FDR": {
-                "METHOD": ["mokapot_trusted"],
-                "MOKAPOT_TRUSTED": {"MODEL_TYPE": "supervised", "DECOY_MSMS_ONLY": True},
+                "METHOD": [{"TRAINING_DATA": "MS/MS", "METHOD": "supervised"}],
+                "DECOY_MSMS_ONLY": True,
             }
         }
         p = tmp_path / "fdr_override.yaml"
         p.write_text(yaml.dump(data))
         cfg = get_cfg_defaults(swaps_optimization_cfg)
         merge_cfg_from_file(cfg, str(p))
-        assert cfg.FDR.METHOD == ["mokapot_trusted"]
-        assert cfg.FDR.MOKAPOT_TRUSTED.MODEL_TYPE == "supervised"
-        assert cfg.FDR.MOKAPOT_TRUSTED.DECOY_MSMS_ONLY is True
+        assert cfg.FDR.METHOD == [{"TRAINING_DATA": "MS/MS", "METHOD": "supervised"}]
+        assert cfg.FDR.DECOY_MSMS_ONLY is True
         # untouched sibling key keeps its default
-        assert cfg.FDR.MOKAPOT_TRUSTED.DECOY_TARGET_RATIO == 1.0
+        assert cfg.FDR.DECOY_TARGET_RATIO == 1.0
 
-    def test_multiple_methods_overridable_via_yaml(self, tmp_path):
-        """Listing both methods is a valid config -- run_fdr_control_onwards
-        reruns the rescoring + finalize tail once per listed method."""
+    def test_multiple_method_entries_overridable_via_yaml(self, tmp_path):
+        """Listing multiple entries is a valid config -- run_fdr_control_onwards
+        reruns the rescoring + finalize tail once per listed entry."""
         from utils.config import merge_cfg_from_file
 
-        data = {"FDR": {"METHOD": ["percolator", "mokapot_trusted"]}}
+        data = {
+            "FDR": {
+                "METHOD": [
+                    {"TRAINING_DATA": "All", "METHOD": "semi-supervised"},
+                    {"TRAINING_DATA": "MS/MS", "METHOD": "supervised"},
+                ]
+            }
+        }
         p = tmp_path / "fdr_multi_method.yaml"
         p.write_text(yaml.dump(data))
         cfg = get_cfg_defaults(swaps_optimization_cfg)
         merge_cfg_from_file(cfg, str(p))
-        assert cfg.FDR.METHOD == ["percolator", "mokapot_trusted"]
+        assert cfg.FDR.METHOD == [
+            {"TRAINING_DATA": "All", "METHOD": "semi-supervised"},
+            {"TRAINING_DATA": "MS/MS", "METHOD": "supervised"},
+        ]
+
+    def test_post_processing_list_overridable_via_yaml(self, tmp_path):
+        from utils.config import merge_cfg_from_file
+
+        data = {"FDR": {"POST_PROCESSING": ["tdc", "mix-max"]}}
+        p = tmp_path / "fdr_pp.yaml"
+        p.write_text(yaml.dump(data))
+        cfg = get_cfg_defaults(swaps_optimization_cfg)
+        merge_cfg_from_file(cfg, str(p))
+        assert cfg.FDR.POST_PROCESSING == ["tdc", "mix-max"]
+
+    @pytest.mark.parametrize(
+        "variant,expected",
+        [
+            ({"TRAINING_DATA": "All", "METHOD": "semi-supervised"}, ("all", "semi-supervised", "all", "semisupervised")),
+            ({"TRAINING_DATA": "MS/MS", "METHOD": "semi-supervised"}, ("ms/ms", "semi-supervised", "msms", "semisupervised")),
+            ({"TRAINING_DATA": "MS/MS", "METHOD": "supervised"}, ("ms/ms", "supervised", "msms", "supervised")),
+            ({"TRAINING_DATA": "ms/ms", "METHOD": "supervised"}, ("ms/ms", "supervised", "msms", "supervised")),
+            ({"TRAINING_DATA": "ALL", "METHOD": "semi-supervised"}, ("all", "semi-supervised", "all", "semisupervised")),
+        ],
+    )
+    def test_resolve_fdr_variant_valid_combos(self, variant, expected):
+        assert _resolve_fdr_variant(variant) == expected
+
+    def test_resolve_fdr_variant_rejects_supervised_with_all(self):
+        with pytest.raises(ValueError, match="supervised"):
+            _resolve_fdr_variant({"TRAINING_DATA": "All", "METHOD": "supervised"})
+
+    def test_resolve_fdr_variant_rejects_unknown_training_data(self):
+        with pytest.raises(ValueError, match="TRAINING_DATA"):
+            _resolve_fdr_variant({"TRAINING_DATA": "Some", "METHOD": "semi-supervised"})
+
+    def test_resolve_fdr_variant_rejects_unknown_method(self):
+        with pytest.raises(ValueError, match="METHOD"):
+            _resolve_fdr_variant({"TRAINING_DATA": "All", "METHOD": "unsupervised"})
+
+
+class TestFdrLegacyConfigMigration:
+    """merge_cfg_from_file migrates pre-refactor effective_config.yaml files
+    (bare-string FDR.METHOD entries + FDR.MOKAPOT_TRUSTED/PERCOLATOR_POST_PROCESSING)
+    so old quant_dirs still resume via --from-fdr."""
+
+    def test_legacy_percolator_and_mokapot_trusted_migrate(self, tmp_path):
+        from utils.config import merge_cfg_from_file
+
+        data = {
+            "FDR": {
+                "METHOD": ["percolator", "mokapot_trusted"],
+                "MOKAPOT_TRUSTED": {
+                    "MODEL_TYPE": "supervised",
+                    "DECOY_MSMS_ONLY": True,
+                    "DECOY_TARGET_RATIO": 2.0,
+                    "SEED": 7,
+                },
+                "PERCOLATOR_POST_PROCESSING": "mix-max",
+            }
+        }
+        p = tmp_path / "legacy.yaml"
+        p.write_text(yaml.dump(data))
+        cfg = get_cfg_defaults(swaps_optimization_cfg)
+        merge_cfg_from_file(cfg, str(p))
+        assert cfg.FDR.METHOD == [
+            {"TRAINING_DATA": "All", "METHOD": "semi-supervised"},
+            {"TRAINING_DATA": "MS/MS", "METHOD": "supervised"},
+        ]
+        assert cfg.FDR.POST_PROCESSING == ["mix-max"]
+        assert cfg.FDR.DECOY_MSMS_ONLY is True
+        assert cfg.FDR.DECOY_TARGET_RATIO == 2.0
+        assert cfg.FDR.SEED == 7
+        assert not hasattr(cfg.FDR, "MOKAPOT_TRUSTED")
+
+    def test_legacy_percolator_only_with_percolator_model_type(self, tmp_path):
+        """mokapot_trusted's default MODEL_TYPE ("percolator") maps to the new
+        "semi-supervised" METHOD, not "supervised"."""
+        from utils.config import merge_cfg_from_file
+
+        data = {
+            "FDR": {
+                "METHOD": ["mokapot_trusted"],
+                "MOKAPOT_TRUSTED": {"MODEL_TYPE": "percolator"},
+            }
+        }
+        p = tmp_path / "legacy2.yaml"
+        p.write_text(yaml.dump(data))
+        cfg = get_cfg_defaults(swaps_optimization_cfg)
+        merge_cfg_from_file(cfg, str(p))
+        assert cfg.FDR.METHOD == [{"TRAINING_DATA": "MS/MS", "METHOD": "semi-supervised"}]
+
+    def test_legacy_scalar_method_migrates(self, tmp_path):
+        """Pre-dates FDR.METHOD becoming a list at all."""
+        from utils.config import merge_cfg_from_file
+
+        data = {"FDR": {"METHOD": "percolator"}}
+        p = tmp_path / "legacy3.yaml"
+        p.write_text(yaml.dump(data))
+        cfg = get_cfg_defaults(swaps_optimization_cfg)
+        merge_cfg_from_file(cfg, str(p))
+        assert cfg.FDR.METHOD == [{"TRAINING_DATA": "All", "METHOD": "semi-supervised"}]

@@ -52,6 +52,7 @@ from postprocessing.rescore import (
     normalize_shift_by_runs,
     combine_matches_target_decoy,
     split_pp_by_match_status,
+    _PERCOLATOR_POST_PROCESSING_FLAGS,
 )
 from postprocessing.match_features import (
     match_features_batches_parallel,
@@ -85,6 +86,35 @@ def _quant_dir(cfg) -> str:
     if not cfg.FDR.ENABLED:
         dir_name += "_no_fdr"
     return os.path.join(cfg.RESULT_PATH, dir_name)
+
+
+def _resolve_fdr_variant(variant: dict) -> tuple[str, str, str, str]:
+    """Validate one cfg.FDR.METHOD entry.
+
+    Returns (training_data, method, training_data_token, method_token), where
+    training_data/method are normalized ("ms/ms"|"all", "supervised"|"semi-supervised")
+    and the *_token values are filesystem-safe fragments for base_dir_name.
+    """
+    training_data = str(variant["TRAINING_DATA"]).strip().lower()
+    method = str(variant["METHOD"]).strip()
+    if training_data not in ("ms/ms", "all"):
+        raise ValueError(
+            f"cfg.FDR.METHOD: unknown TRAINING_DATA {variant['TRAINING_DATA']!r} -- "
+            "expected 'MS/MS' or 'All'"
+        )
+    if method not in ("supervised", "semi-supervised"):
+        raise ValueError(
+            f"cfg.FDR.METHOD: unknown METHOD {method!r} -- expected 'supervised' or "
+            "'semi-supervised'"
+        )
+    if method == "supervised" and training_data != "ms/ms":
+        raise ValueError(
+            "cfg.FDR.METHOD: 'supervised' is only valid with TRAINING_DATA='MS/MS' "
+            "(fixed-label fit needs MS/MS-confirmed ground-truth labels)"
+        )
+    training_data_token = "msms" if training_data == "ms/ms" else "all"
+    method_token = method.replace("-", "")
+    return training_data, method, training_data_token, method_token
 
 
 def _to_parquet_safe(df: pd.DataFrame, path: str, **kwargs):
@@ -808,10 +838,11 @@ def run_fdr_control_onwards(
     )
 
     # One (dir_name, pp_match_target_filtered) entry per cfg.FDR.METHOD entry
-    # (or exactly one, FDR-disabled entry) -- _finalize_fdr_results runs once
-    # per entry below, each writing into its own dir_name subdir, so listing
-    # multiple methods just reruns the rescoring + finalize tail once per
-    # method instead of picking one.
+    # (times FDR.POST_PROCESSING for semi-supervised entries; or exactly one,
+    # FDR-disabled entry) -- _finalize_fdr_results runs once per entry below,
+    # each writing into its own dir_name subdir, so listing multiple entries
+    # just reruns the rescoring + finalize tail once per entry instead of
+    # picking one.
     _fdr_runs: list[tuple[str, pd.DataFrame]] = []
     if cfg.FDR.ENABLED:
         tdc_df, _feature_cols = _build_fdr_feature_cols(
@@ -819,100 +850,118 @@ def run_fdr_control_onwards(
         )
         fdr_methods = cfg.FDR.METHOD
         assert fdr_methods, "cfg.FDR.METHOD is empty -- must list at least one method."
-        for fdr_method in fdr_methods:
-            if fdr_method == "percolator":
-                percolator_post_processing = cfg.FDR.PERCOLATOR_POST_PROCESSING
-                # Percolator itself is trained/scored identically regardless
-                # of ONLY_SCORE_MATCH, so its work_dir (and cache) is shared;
-                # only the downstream filtered outputs differ, so they get
-                # their own subdir. train_fdr changes what percolator
-                # actually learns (unlike ONLY_SCORE_MATCH, which only gates
-                # downstream filtering), so every value gets its own
-                # work_dir to avoid silently overwriting a different
-                # train_fdr's percolator_psms.tsv.
-                base_dir_name = (
-                    f"percolator_postprocessing_{percolator_post_processing}"
-                    f"_trainfdr{cfg.FDR.TRAIN}"
-                )
-                psms, peptide, all_psms = brew_with_percolator(
-                    tdc_df,
-                    feature_cols=_feature_cols,
-                    train_fdr=cfg.FDR.TRAIN,
-                    test_fdr=cfg.FDR.TEST,
-                    work_dir=os.path.join(quant_dir, base_dir_name),
-                    post_processing=percolator_post_processing,
-                    decoy_col="Decoy",
-                    filename_col="matched_run",
-                    peptide_col="Sequence",
-                    protein_col="Proteins",
-                )
-                # Filter for the columns passed the makopot filter
-                psms["mz_rank"] = psms["PSMId"].str.split("_").str[0].astype(int)
+        assert cfg.FDR.POST_PROCESSING, (
+            "cfg.FDR.POST_PROCESSING is empty -- must list at least one of "
+            "'tdc'/'mix-max'."
+        )
+        for variant in fdr_methods:
+            training_data, method, td_token, m_token = _resolve_fdr_variant(variant)
 
-                # Filter for the columns passed the makopot filter
-                psms_filtered = psms.loc[(psms["q-value"] < 0.01)]
-            elif fdr_method == "mokapot_trusted":
-                model_type = cfg.FDR.MOKAPOT_TRUSTED.MODEL_TYPE
-                # Same work_dir-sharing rationale as the percolator branch
-                # above: training/scoring is invariant to ONLY_SCORE_MATCH,
-                # so it's shared across that flag's values; train_fdr
-                # changes what the model learns, so it gets its own
-                # work_dir.
-                base_dir_name = (
-                    f"mokapot_trusted_{model_type}_trainfdr{cfg.FDR.TRAIN}"
-                )
+            # Trusted-pool selection is shared by both MS/MS-training methods
+            # (semi-supervised static-model training and the fixed-label
+            # supervised fit) -- compute it once per variant, not per
+            # post_processing multiplication below.
+            train_df = None
+            if training_data == "ms/ms":
                 train_df = select_trusted_training_rows(
                     tdc_df,
                     dict_ref,
-                    decoy_target_ratio=cfg.FDR.MOKAPOT_TRUSTED.DECOY_TARGET_RATIO,
+                    decoy_target_ratio=cfg.FDR.DECOY_TARGET_RATIO,
                     run_col="matched_run",
-                    rng=cfg.FDR.MOKAPOT_TRUSTED.SEED,
-                    decoy_msms_only=cfg.FDR.MOKAPOT_TRUSTED.DECOY_MSMS_ONLY,
-                )
-                psms_filtered_full, _, _ = brew_trusted_target_model(
-                    train_df,
-                    tdc_df,
-                    _feature_cols,
-                    model_type=model_type,
-                    train_fdr=cfg.FDR.TRAIN,
-                    work_dir=os.path.join(quant_dir, base_dir_name),
-                    decoy_col="Decoy",
-                    peptide_col="Sequence",
-                    protein_col="Proteins",
-                    filename_col="matched_run",
-                    rng=cfg.FDR.MOKAPOT_TRUSTED.SEED,
-                )
-                # psms_filtered_full already has "mz_rank"/"filename"/
-                # "q-value" columns (see brew_trusted_target_model's return
-                # contract), matching the percolator branch's psms shape
-                # above.
-                psms_filtered = psms_filtered_full.loc[
-                    psms_filtered_full["q-value"] < cfg.FDR.TEST
-                ]
-            else:
-                raise ValueError(
-                    f"Unknown cfg.FDR.METHOD entry: {fdr_method!r} -- expected "
-                    "'percolator' or 'mokapot_trusted'"
+                    rng=cfg.FDR.SEED,
+                    decoy_msms_only=cfg.FDR.DECOY_MSMS_ONLY,
                 )
 
-            dir_name = os.path.join(
-                base_dir_name, f"only_score_match_{cfg.FDR.ONLY_SCORE_MATCH}"
+            # POST_PROCESSING only multiplies semi-supervised runs (real
+            # percolator CLI, either TRAINING_DATA) -- supervised is a single
+            # fixed-label fit with its own competition, unaffected by it.
+            post_processing_values = (
+                cfg.FDR.POST_PROCESSING if method == "semi-supervised" else [None]
             )
-            pp_match_target_filtered = pp_match_target_notmsms.merge(
-                psms_filtered[["filename", "mz_rank"]],
-                left_on=["mz_rank", "Run_name"],
-                right_on=["mz_rank", "filename"],
-                how="inner",
-            )
-            os.makedirs(os.path.join(quant_dir, dir_name), exist_ok=True)
-            _to_parquet_safe(
-                pp_match_target_filtered,
-                os.path.join(quant_dir, dir_name, "pp_match_target_filtered.parquet"),
-                index=False,
-            )
-            _fdr_runs.append(
-                (dir_name, pp_match_target_filtered.drop(columns=["filename"]))
-            )
+            for post_processing in post_processing_values:
+                if method == "semi-supervised":
+                    if post_processing not in _PERCOLATOR_POST_PROCESSING_FLAGS:
+                        raise ValueError(
+                            f"cfg.FDR.POST_PROCESSING: unknown value {post_processing!r} "
+                            f"-- expected one of {list(_PERCOLATOR_POST_PROCESSING_FLAGS)}"
+                        )
+                    # Percolator itself is trained/scored identically
+                    # regardless of ONLY_SCORE_MATCH, so its work_dir (and
+                    # cache) is shared; only the downstream filtered outputs
+                    # differ, so they get their own subdir. train_fdr changes
+                    # what percolator actually learns (unlike
+                    # ONLY_SCORE_MATCH, which only gates downstream
+                    # filtering), so every value gets its own work_dir to
+                    # avoid silently overwriting a different train_fdr's
+                    # percolator_psms.tsv.
+                    base_dir_name = (
+                        f"trainingdata_{td_token}_{m_token}"
+                        f"_postprocessing_{post_processing}_trainfdr{cfg.FDR.TRAIN}"
+                    )
+                    psms, peptide, all_psms = brew_with_percolator(
+                        tdc_df,
+                        feature_cols=_feature_cols,
+                        train_df=train_df,  # None for "all" -> single-phase train==score
+                        train_fdr=cfg.FDR.TRAIN,
+                        test_fdr=cfg.FDR.TEST,
+                        work_dir=os.path.join(quant_dir, base_dir_name),
+                        post_processing=post_processing,
+                        decoy_col="Decoy",
+                        filename_col="matched_run",
+                        peptide_col="Sequence",
+                        protein_col="Proteins",
+                    )
+                    # Filter for the columns passed the makopot filter
+                    psms["mz_rank"] = psms["PSMId"].str.split("_").str[0].astype(int)
+
+                    # Filter for the columns passed the makopot filter
+                    psms_filtered = psms.loc[(psms["q-value"] < 0.01)]
+                else:  # "supervised" -- _resolve_fdr_variant guarantees training_data == "ms/ms"
+                    # Same work_dir-sharing rationale as the semi-supervised
+                    # branch above: training/scoring is invariant to
+                    # ONLY_SCORE_MATCH, so it's shared across that flag's
+                    # values; train_fdr changes what the model learns, so it
+                    # gets its own work_dir.
+                    base_dir_name = f"trainingdata_{td_token}_{m_token}_trainfdr{cfg.FDR.TRAIN}"
+                    psms_filtered_full, _, _ = brew_trusted_target_model(
+                        train_df,
+                        tdc_df,
+                        _feature_cols,
+                        model_type="supervised",
+                        train_fdr=cfg.FDR.TRAIN,
+                        work_dir=os.path.join(quant_dir, base_dir_name),
+                        decoy_col="Decoy",
+                        peptide_col="Sequence",
+                        protein_col="Proteins",
+                        filename_col="matched_run",
+                        rng=cfg.FDR.SEED,
+                    )
+                    # psms_filtered_full already has "mz_rank"/"filename"/
+                    # "q-value" columns (see brew_trusted_target_model's return
+                    # contract), matching the semi-supervised branch's psms
+                    # shape above.
+                    psms_filtered = psms_filtered_full.loc[
+                        psms_filtered_full["q-value"] < cfg.FDR.TEST
+                    ]
+
+                dir_name = os.path.join(
+                    base_dir_name, f"only_score_match_{cfg.FDR.ONLY_SCORE_MATCH}"
+                )
+                pp_match_target_filtered = pp_match_target_notmsms.merge(
+                    psms_filtered[["filename", "mz_rank"]],
+                    left_on=["mz_rank", "Run_name"],
+                    right_on=["mz_rank", "filename"],
+                    how="inner",
+                )
+                os.makedirs(os.path.join(quant_dir, dir_name), exist_ok=True)
+                _to_parquet_safe(
+                    pp_match_target_filtered,
+                    os.path.join(quant_dir, dir_name, "pp_match_target_filtered.parquet"),
+                    index=False,
+                )
+                _fdr_runs.append(
+                    (dir_name, pp_match_target_filtered.drop(columns=["filename"]))
+                )
     else:
         logging.info(
             "cfg.FDR.ENABLED is False — skipping Mokapot/percolator FDR control; "

@@ -202,10 +202,23 @@ __C.FDR.TRAIN = 0.01  # percolator's own -F default; train_fdr was never actuall
 __C.FDR.TEST = 0.01
 __C.FDR.INT_THRES = 100  # intensity threshold for FDR; 0 means no threshold
 __C.FDR.ONLY_SCORE_MATCH = True  # if True, exclude Reference/Quant_Only run-peptide pairs from rescoring and pass them directly as "MS/MS" in the output
-__C.FDR.PERCOLATOR_POST_PROCESSING = "tdc"  # "tdc" (-Y, target-decoy competition) or "mix-max" (-y); selects percolator's post-processing method and the percolator_dir_name suffix
-__C.FDR.METHOD = ["percolator"]  # list of one or more of "percolator" (trains on all target candidates via the percolator CLI) / "mokapot_trusted" (trains only on MS/MS-confirmed targets + a balanced decoy sample; see postprocessing.rescore.brew_trusted_target_model / swaps/rescore_msms_trusted_ims.py). Listing more than one just reruns the rescoring + finalize tail once per method, each writing into its own quant_dir subdir (percolator_postprocessing_<x>_trainfdr<y>/ or mokapot_trusted_<model_type>_trainfdr<y>/) -- there is no combined/ensembled output. Ignored when FDR.ENABLED is False.
-__C.FDR.MOKAPOT_TRUSTED = ConfigurationNode()
-__C.FDR.MOKAPOT_TRUSTED.MODEL_TYPE = "percolator"  # "percolator" (mokapot's stock semi-supervised PercolatorModel, restricted to the trusted pool) or "supervised" (fixed-label fit, no iterative label refinement). Only used when "mokapot_trusted" is in FDR.METHOD
-__C.FDR.MOKAPOT_TRUSTED.DECOY_TARGET_RATIO = 1.0  # decoys sampled per MS/MS-trusted target for training (1.0 = balanced)
-__C.FDR.MOKAPOT_TRUSTED.DECOY_MSMS_ONLY = False  # if True, restrict training decoys to those generated at MS/MS-confirmed slots instead of the full decoy pool (see select_trusted_training_rows) -- shrinks the decoy pool to roughly 1 per trusted target, so DECOY_TARGET_RATIO > 1 will typically fall back to using all available decoys
-__C.FDR.MOKAPOT_TRUSTED.SEED = 0  # decoy subsampling / supervised class_weight CV fold shuffling random seed
+__C.FDR.POST_PROCESSING = ["tdc"]  # list of "tdc" (-Y, target-decoy competition) / "mix-max" (-y); used whenever a FDR.METHOD entry has METHOD="semi-supervised" (real percolator CLI, for either TRAINING_DATA) -- each listed value reruns that entry once more with that post-processing, so e.g. ["tdc", "mix-max"] runs both for every semi-supervised entry. Ignored for METHOD="supervised" entries (single run, no multiplication).
+__C.FDR.DECOY_TARGET_RATIO = 1.0  # decoys sampled per MS/MS-trusted target for training (1.0 = balanced); only used for TRAINING_DATA="MS/MS" entries
+__C.FDR.DECOY_MSMS_ONLY = False  # if True, restrict training decoys to those generated at MS/MS-confirmed slots instead of the full decoy pool (see select_trusted_training_rows) -- shrinks the decoy pool to roughly 1 per trusted target, so DECOY_TARGET_RATIO > 1 will typically fall back to using all available decoys; only used for TRAINING_DATA="MS/MS" entries
+__C.FDR.SEED = 0  # decoy subsampling / supervised class_weight CV fold shuffling random seed; only used for TRAINING_DATA="MS/MS" entries
+__C.FDR.METHOD = [{"TRAINING_DATA": "All", "METHOD": "semi-supervised"}]
+# list of {"TRAINING_DATA": "MS/MS" | "All" (case-insensitive), "METHOD": "supervised" | "semi-supervised"}.
+# "supervised" is only valid with TRAINING_DATA="MS/MS" (fixed-label fit needs MS/MS-confirmed ground-truth
+# labels). The rescoring engine is derived from the pair, not chosen directly:
+#   - METHOD="semi-supervised" -> real percolator CLI (postprocessing.rescore.brew_with_percolator).
+#     TRAINING_DATA="All": trains and scores the full candidate population directly (today's plain
+#     "percolator" method). TRAINING_DATA="MS/MS": trains on the MS/MS-trusted pool (see
+#     select_trusted_training_rows) and freezes those weights via percolator's own static-model mode
+#     (--weights / --static --init-weights) before scoring the full population -- see
+#     doi:10.1021/acs.jproteome.9b00780's "static model" strategy.
+#   - METHOD="supervised" (TRAINING_DATA="MS/MS" only) -> fixed-label LinearSVC fit
+#     (postprocessing.rescore.brew_trusted_target_model), no iterative label refinement, no percolator
+#     CLI involved.
+# Listing more than one entry reruns the rescoring + finalize tail once per entry (further multiplied by
+# FDR.POST_PROCESSING for semi-supervised entries), each into its own quant_dir subdir -- there is no
+# combined/ensembled output. Ignored when FDR.ENABLED is False.
