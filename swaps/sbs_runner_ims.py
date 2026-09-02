@@ -193,14 +193,21 @@ def opt_scan_by_scan(config_path: str):
             case "fragpipe":
                 evidence = pd.DataFrame()
                 for exp_dir in os.listdir(cfg.SEARCH_OUTPUT_PATH):
+                    exp_dir_path = os.path.join(cfg.SEARCH_OUTPUT_PATH, exp_dir)
+                    psm_path = os.path.join(exp_dir_path, "psm.tsv")
                     if (
-                        os.path.isdir(os.path.join(cfg.SEARCH_OUTPUT_PATH, exp_dir))
+                        os.path.isdir(exp_dir_path)
                         and exp_dir != "MSBooster"
                     ):
-                        tmp = pd.read_csv(
-                            os.path.join(cfg.SEARCH_OUTPUT_PATH, exp_dir, "psm.tsv"),
-                            sep="\t",
-                        )
+                        if not os.path.exists(psm_path):
+                            # e.g. a stray non-experiment subdir (empty "original/"
+                            # backup dir seen in some fragpipe outputs) -- skip it
+                            # rather than crash, same treatment as "MSBooster".
+                            logging.warning(
+                                "Skipping %s: no psm.tsv found", exp_dir_path
+                            )
+                            continue
+                        tmp = pd.read_csv(psm_path, sep="\t")
                         evidence = pd.concat([evidence, tmp], ignore_index=True)
                         logging.info(
                             "Loaded evidence with %s rows from %s", len(tmp), exp_dir
@@ -226,6 +233,28 @@ def opt_scan_by_scan(config_path: str):
                 "Excluded %d evidence rows from %s",
                 before - len(evidence),
                 excluded_raw,
+            )
+        # The search engine may have been run against more raw files than are
+        # actually present under DATA_PATH now (e.g. a stray fragpipe
+        # experiment subdir with no matching .d folder) -- any such raw file
+        # would end up referenced in dict_ref's Reference/Match/Quant_Only
+        # columns with no activation data ever built for it, crashing Stage 3
+        # (match_features.py's _select_mz: KeyError on that raw file). Drop
+        # its evidence rows here instead, same treatment as EXCLUDE_DATASET_NAME.
+        _available_raw_files = {
+            os.path.basename(dot_d_path).split(".")[0]
+            for data_path in cfg.DATA_PATH
+            for dot_d_path in get_dot_d_paths(data_path, cfg.EXCLUDE_DATASET_NAME)
+        }
+        _missing_raw_files = set(evidence["Raw file"].unique()) - _available_raw_files  # type: ignore
+        if _missing_raw_files:
+            before = len(evidence)  # type: ignore
+            evidence = evidence.loc[evidence["Raw file"].isin(_available_raw_files)]  # type: ignore
+            logging.warning(
+                "Excluded %d evidence rows for raw file(s) %s: present in the "
+                "search results but no corresponding .d folder found under DATA_PATH",
+                before - len(evidence),
+                sorted(_missing_raw_files),
             )
         dict_ref = construct_dict_from_search_pivoted(
             cfg_prepare_dict=cfg.PREPARE_DICT,
