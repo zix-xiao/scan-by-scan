@@ -776,6 +776,7 @@ def match_features_batch(
     illustration_dir: str | None = None,
     merge_confounders_enabled: bool = True,
     illustration_log_transform: bool = False,
+    illustration_show_axes: bool = False,
 ):
     """Process one peptide batch using the consensus image path."""
     results_target, results_decoy = [], []
@@ -1306,6 +1307,7 @@ def match_features_batch(
                 _batch_svg_dir,
                 raw_images=[_get_pept_act_tuple(rf)[0] for rf in _consensus_raw_files],
                 log_transform_display=illustration_log_transform,
+                show_axes=illustration_show_axes,
             )
         consensus_pp = _consensus_bundle.consensus_pp
         individual_pps = _consensus_bundle.individual_pps
@@ -1459,6 +1461,7 @@ def match_features_batch(
                             raw_images=_plot_raw_images,
                             filename_prefix=f"decoy_peptide_swap_rep{_rep}_",
                             log_transform_display=illustration_log_transform,
+                            show_axes=illustration_show_axes,
                         )
 
         # bbox_swap: unlike off_target_shift, this decoy needs its own genuine
@@ -1592,6 +1595,7 @@ def match_features_batch(
                             raw_images=_plot_raw_images,
                             filename_prefix=f"decoy_bbox_swap_rep{_rep}_",
                             log_transform_display=illustration_log_transform,
+                            show_axes=illustration_show_axes,
                         )
 
         # bbox_noise: like bbox_swap, built BEFORE alignment and pushed
@@ -1688,6 +1692,7 @@ def match_features_batch(
                             raw_images=_plot_raw_images,
                             filename_prefix=f"decoy_bbox_noise_rep{_rep}_",
                             log_transform_display=illustration_log_transform,
+                            show_axes=illustration_show_axes,
                         )
 
         _off_target_label_shifts: list[tuple[int, int] | None] = []
@@ -1733,6 +1738,7 @@ def match_features_batch(
                             filename_prefix=f"decoy_off_target_shift_rep{_rep}_",
                             skip_per_run=True,
                             log_transform_display=illustration_log_transform,
+                            show_axes=illustration_show_axes,
                         )
         if consensus_pp is not None:
             for _ci, (_rf, _ind_pp) in enumerate(
@@ -4702,6 +4708,7 @@ def _save_illustration_svgs(
     segmentation_override: "ConsensusSegmentationState | None" = None,
     skip_per_run: bool = False,
     log_transform_display: bool = False,
+    show_axes: bool = False,
 ) -> None:
     """Save individual clean SVG images for one peptide: raw, aligned, consensus, watershed.
 
@@ -4716,6 +4723,8 @@ def _save_illustration_svgs(
                             (consensus_denoised already reflects
                             MATCH_FEATURES_KWARGS.denoise.log_transform if that's enabled, so
                             it is not affected by this flag).
+    show_axes: if True, draw x/y tick marks and axis labels (RT/IM pixel index) instead of
+               hiding the axes entirely.
     """
     import matplotlib.pyplot as plt
 
@@ -4738,7 +4747,11 @@ def _save_illustration_svgs(
     ) -> "tuple[plt.Figure, plt.Axes]":
         fig, ax = plt.subplots(figsize=(3, 3))
         ax.imshow(img, aspect="auto", origin="lower", cmap=cmap, vmin=vmin, vmax=vmax)
-        ax.axis("off")
+        if show_axes:
+            ax.set_xlabel("IM axis")
+            ax.set_ylabel("RT axis")
+        else:
+            ax.axis("off")
         return fig, ax
 
     def _save_fig(fig: "plt.Figure", fname: str) -> None:
